@@ -706,6 +706,46 @@ function checkVehicleAhead(vehicle) {
     return closestDist;
 }
 
+function attemptLaneChange(vehicle) {
+    // Only change lanes if not turning and on a straight road
+    if (vehicle.turning) return false;
+
+    const pos = vehicle.mesh.position;
+    const forward = new THREE.Vector3(0, 0, 1);
+    forward.applyAxisAngle(new THREE.Vector3(0, 1, 0), vehicle.mesh.rotation.y);
+
+    // Determine perpendicular direction (right side of vehicle)
+    const right = new THREE.Vector3(-forward.z, 0, forward.x);
+
+    // Try to change to the opposite lane
+    const targetLaneOffset = -vehicle.lane * (CONFIG.LANE_WIDTH * 1.5);
+    const targetPos = new THREE.Vector3(
+        pos.x + right.x * targetLaneOffset,
+        pos.y,
+        pos.z + right.z * targetLaneOffset
+    );
+
+    // Check if target lane is clear
+    for (const other of vehicles) {
+        if (other === vehicle) continue;
+
+        const dx = other.mesh.position.x - targetPos.x;
+        const dz = other.mesh.position.z - targetPos.z;
+        const dist = Math.sqrt(dx * dx + dz * dz);
+
+        if (dist < CONFIG.VEHICLE.SAFE_DISTANCE * 1.5) {
+            return false; // Not safe to change lanes
+        }
+    }
+
+    // Execute lane change
+    vehicle.mesh.position.x = targetPos.x;
+    vehicle.mesh.position.z = targetPos.z;
+    vehicle.lane = -vehicle.lane; // Switch lane direction
+
+    return true;
+}
+
 export function updateVehicles(delta) {
     const halfGrid = (CONFIG.GRID_SIZE * (CONFIG.BLOCK_SIZE + CONFIG.STREET_WIDTH)) / 2;
     const boundary = halfGrid + CONFIG.STREET_WIDTH;
@@ -718,8 +758,13 @@ export function updateVehicles(delta) {
         if (lightInfo) {
             if (lightInfo.state === 'red' && lightInfo.distance < CONFIG.VEHICLE.STOP_DISTANCE) {
                 shouldStop = true;
-            } else if (lightInfo.state === 'yellow' && lightInfo.distance < CONFIG.VEHICLE.STOP_DISTANCE * 0.7) {
-                shouldStop = true;
+            } else if (lightInfo.state === 'yellow') {
+                // Aggressive drivers try to beat yellow lights
+                if (vehicle.type === 'AGGRESSIVE' && lightInfo.distance > CONFIG.VEHICLE.STOP_DISTANCE * 0.3) {
+                    shouldStop = false; // Speed through!
+                } else if (lightInfo.distance < CONFIG.VEHICLE.STOP_DISTANCE * 0.7) {
+                    shouldStop = true;
+                }
             }
         }
 
@@ -731,21 +776,34 @@ export function updateVehicles(delta) {
 
         if (distAhead < currentSafeDist) {
             shouldStop = true;
+            // Try to change lanes if stuck behind another vehicle (aggressive behavior)
+            if (vehicle.type === 'AGGRESSIVE' && Math.random() < CONFIG.VEHICLE.LANE_CHANGE_PROBABILITY * 3) {
+                attemptLaneChange(vehicle);
+            }
         } else if (distAhead < currentSafeDist * 1.5) {
             vehicle.targetSpeed = vehicle.maxSpeed * 0.5;
+            // Normal vehicles might also try to change lanes when slowed down
+            if (Math.random() < CONFIG.VEHICLE.LANE_CHANGE_PROBABILITY) {
+                attemptLaneChange(vehicle);
+            }
         } else {
             vehicle.targetSpeed = vehicle.maxSpeed;
         }
 
         // Update speed with easing
         if (shouldStop) {
-            // Smooth braking
-            vehicle.speed = Math.max(0, vehicle.speed - vehicle.acceleration * 1.5 * delta * 60);
+            // Smooth braking - more aggressive for aggressive drivers
+            const brakeMultiplier = vehicle.type === 'AGGRESSIVE' ? 2.0 :
+                                   vehicle.type === 'CAUTIOUS' ? 1.2 : 1.5;
+            vehicle.speed = Math.max(0, vehicle.speed - vehicle.acceleration * brakeMultiplier * delta * 60);
             vehicle.stopped = vehicle.speed < 0.01;
         } else {
-            // Smooth acceleration
+            // Smooth acceleration with more realistic ramping
             if (vehicle.speed < vehicle.targetSpeed) {
-                vehicle.speed += vehicle.acceleration * delta * 60;
+                // Add slight variation to acceleration for more natural flow
+                const accelVariation = 0.9 + Math.random() * 0.2;
+                vehicle.speed += vehicle.acceleration * accelVariation * delta * 60;
+                vehicle.speed = Math.min(vehicle.speed, vehicle.targetSpeed);
             } else {
                 // Natural deceleration if over target speed
                 vehicle.speed -= vehicle.acceleration * 0.5 * delta * 60;
@@ -754,7 +812,7 @@ export function updateVehicles(delta) {
         }
 
         // Handle turning at intersections
-        if (!vehicle.turning && Math.random() < 0.001 && vehicle.speed > 0.1) {
+        if (!vehicle.turning && Math.random() < CONFIG.VEHICLE.TURN_PROBABILITY && vehicle.speed > 0.1) {
             // Check if at intersection
             for (const intersection of intersections) {
                 const dx = Math.abs(intersection.x - vehicle.mesh.position.x);

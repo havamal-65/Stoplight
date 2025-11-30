@@ -16,6 +16,14 @@ export const CONFIG = {
         ACCELERATION: 0.008,
         DECELERATION: 0.015,
         SAFE_DISTANCE: 6,
-        STOP_DISTANCE: 8
+        STOP_DISTANCE: 8,
+        TURN_PROBABILITY: 0.004,  // Increased from 0.001 for more frequent turns
+        LANE_CHANGE_PROBABILITY: 0.002  // New: chance to change lanes
+    },
+
+    TRAFFIC: {
+        DEFAULT_DENSITY: 50,     // Increased from 30
+        MIN_DENSITY: 10,
+        MAX_DENSITY: 120         // Increased from 60
     }
 };

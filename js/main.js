@@ -29,7 +29,7 @@ function init() {
         console.log("Creating city grid...");
         createCityGrid();
         console.log("Spawning vehicles...");
-        spawnVehicles(30);
+        spawnVehicles(50);
         console.log("Initializing input...");
         initInput(renderer, scene, camera);
         console.log("Input initialized");
