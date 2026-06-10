@@ -27,6 +27,8 @@ canvas {
     top: 0;
     left: 0;
     z-index: -1;
+    /* Stop the browser consuming touch drags/pinches as page gestures */
+    touch-action: none;
 }
 
 /* Glassmorphism Panel Base */
@@ -177,6 +179,21 @@ button:active {
     font-family: monospace;
     border: 1px solid rgba(255, 255, 255, 0.2);
     margin-right: 4px;
+}
+
+/* Show touch instructions on touch devices, mouse instructions elsewhere */
+.touch-controls {
+    display: none;
+}
+
+@media (hover: none) and (pointer: coarse) {
+    .desktop-controls {
+        display: none;
+    }
+
+    .touch-controls {
+        display: inline;
+    }
 }
 
 /* Editor Panel */
