@@ -21,10 +21,7 @@ export function initRenderer() {
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-    console.log("Renderer created:", renderer);
-    console.log("Appending canvas to body...", renderer.domElement);
     document.body.appendChild(renderer.domElement);
-    console.log("Canvas appended.");
 
     // Lights
     // Hemisphere light for nice sky/ground color blend

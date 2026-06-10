@@ -1,4 +1,3 @@
-console.log("Main.js loaded");
 import { initRenderer, scene, camera, renderer } from './Renderer.js';
 import { createGround, createCityGrid, spawnVehicles, updateTrafficLights, updateVehicles, vehicles, initTrafficSystem } from './TrafficSystem.js';
 import { initInput } from './InputManager.js';
@@ -9,58 +8,34 @@ let simTime = 0;
 window.simSpeed = 1; // Global for access in InputManager
 
 function init() {
-    console.log("Init started");
-    try {
-        console.log("Calling initRenderer...");
-        initRenderer();
-        console.log("initRenderer done");
+    initRenderer();
+    initTrafficSystem(scene);
+    initParticleSystem(scene);
 
-        // Initialize Traffic System with the scene
-        console.log("Calling initTrafficSystem...");
-        initTrafficSystem(scene);
-        console.log("initTrafficSystem done");
+    createGround();
+    createCityGrid();
+    spawnVehicles(30);
+    initInput(renderer, scene, camera);
+    GameManager.init();
 
-        console.log("Calling initParticleSystem...");
-        initParticleSystem(scene);
-        console.log("initParticleSystem done");
+    // Listen for reset event
+    window.addEventListener('resetSimulation', () => {
+        simTime = 0;
+        const density = document.getElementById('density').value;
+        spawnVehicles(parseInt(density));
+    });
 
-        console.log("Creating ground...");
-        createGround();
-        console.log("Creating city grid...");
-        createCityGrid();
-        console.log("Spawning vehicles...");
-        spawnVehicles(30);
-        console.log("Initializing input...");
-        initInput(renderer, scene, camera);
-        console.log("Input initialized");
+    // Density slider
+    const densityInput = document.getElementById('density');
+    densityInput.addEventListener('change', (e) => {
+        spawnVehicles(parseInt(e.target.value));
+    });
 
-        // Listen for reset event
-        window.addEventListener('resetSimulation', () => {
-            simTime = 0;
-            const density = document.getElementById('density').value;
-            spawnVehicles(parseInt(density));
-        });
-
-        // Density slider
-        const densityInput = document.getElementById('density');
-        densityInput.addEventListener('change', (e) => {
-            const count = parseInt(e.target.value);
-            console.log("Updating traffic density to:", count);
-            spawnVehicles(count);
-        });
-
-        console.log("Starting animation loop...");
-        animate();
-    } catch (e) {
-        console.error("Initialization Error:", e);
-    }
+    animate();
 }
 
 let lastTime = 0;
-let frameCount = 0;
 function animate(time = 0) {
-    frameCount++;
-    if (frameCount % 60 === 0) console.log("Frame:", frameCount, "Time:", time);
     requestAnimationFrame(animate);
 
     const delta = Math.min((time - lastTime) / 1000, 0.1) * window.simSpeed;
@@ -69,15 +44,11 @@ function animate(time = 0) {
     simTime += delta;
     document.getElementById('simTime').innerText = formatTime(simTime);
 
-    try {
-        updateTrafficLights(delta, simTime);
-        updateVehicles(delta);
-        updateParticles(delta);
-        GameManager.update(delta, vehicles);
-        renderer.render(scene, camera);
-    } catch (e) {
-        console.error("Animation Error:", e);
-    }
+    updateTrafficLights(delta);
+    updateVehicles(delta);
+    updateParticles(delta);
+    GameManager.update(delta, vehicles);
+    renderer.render(scene, camera);
 }
 
 init();

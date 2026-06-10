@@ -6,9 +6,9 @@ export const CONFIG = {
     LANE_WIDTH: 3,          // Width of each lane
 
     LIGHT_DURATION: {
-        GREEN: 8,
+        GREEN: 8,       // Default green time per direction
         YELLOW: 2,
-        RED: 10
+        ALL_RED: 1      // Clearance interval between direction changes
     },
 
     VEHICLE: {

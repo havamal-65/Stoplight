@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdnjs.cloudflare.com data: blob:;">
+        content="default-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://fonts.googleapis.com https://fonts.gstatic.com data: blob:;">
     <title>3D City Traffic Simulation</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -57,11 +57,11 @@
         <h3>🚦 Intersection Control</h3>
         <p>Adjust signal timings for this intersection.</p>
 
-        <label>Green Light (NS): <span id="greenVal">8</span>s</label>
-        <input type="range" id="greenTime" min="3" max="20" value="8">
+        <label>Green Light (NS): <span id="nsGreenVal">8</span>s</label>
+        <input type="range" id="nsGreenTime" min="3" max="20" value="8">
 
-        <label>Red Light (NS): <span id="redVal">10</span>s</label>
-        <input type="range" id="redTime" min="3" max="20" value="10">
+        <label>Green Light (EW): <span id="ewGreenVal">8</span>s</label>
+        <input type="range" id="ewGreenTime" min="3" max="20" value="8">
 
         <button id="closeEditor">Close</button>
     </div>
@@ -79,7 +79,7 @@
         <kbd>Scroll</kbd> Zoom
     </div>
 
-    <script type="module" src="js/main.js?v=12"></script>
+    <script type="module" src="js/main.js"></script>
 </body>
 
 </html>

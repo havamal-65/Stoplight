@@ -44,6 +44,7 @@ export function updateParticles(delta) {
 
         if (p.life <= 0) {
             scene.remove(p.mesh);
+            p.mesh.material.dispose();
             particles.splice(i, 1);
         } else {
             // Move up

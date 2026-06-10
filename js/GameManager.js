@@ -1,5 +1,3 @@
-import { spawnVehicles } from './TrafficSystem.js';
-
 export const GameManager = {
     score: 0,
     efficiency: 100,
@@ -8,6 +6,11 @@ export const GameManager = {
     arrivedVehicles: 0,
     stoppedTime: 0,
     state: 'playing', // playing, gameover, levelcomplete
+
+    init: function () {
+        const btn = document.getElementById('modalButton');
+        if (btn) btn.addEventListener('click', () => this.reset());
+    },
 
     update: function (delta, vehicles) {
         if (this.state !== 'playing') return;
@@ -31,6 +34,18 @@ export const GameManager = {
 
         const arrEl = document.getElementById('arrivedCount');
         if (arrEl) arrEl.textContent = this.arrivedVehicles;
+
+        const countEl = document.getElementById('vehicleCount');
+        if (countEl) countEl.textContent = vehicles.length;
+
+        const stoppedEl = document.getElementById('stoppedCount');
+        if (stoppedEl) stoppedEl.textContent = stoppedCount;
+
+        const avgEl = document.getElementById('avgSpeed');
+        if (avgEl) {
+            const avgSpeed = vehicles.reduce((sum, v) => sum + v.speed, 0) / total;
+            avgEl.textContent = Math.round(avgSpeed * 100);
+        }
 
         // Color code efficiency
         if (effEl) {
@@ -64,15 +79,11 @@ export const GameManager = {
         this.efficiency = 100;
         this.arrivedVehicles = 0;
         this.state = 'playing';
-        document.getElementById('modalOverlay').style.display = 'none';
 
-        // We need to reset simTime in main.js, but we can't access it directly here easily without a callback or event.
-        // For now, we'll handle the vehicle spawn here.
-        const densityInput = document.getElementById('density');
-        const density = densityInput ? parseInt(densityInput.value) : 30;
-        spawnVehicles(density);
+        const overlay = document.getElementById('modalOverlay');
+        if (overlay) overlay.style.display = 'none';
 
-        // Dispatch event to reset time
+        // main.js listens for this: resets the clock and respawns vehicles
         window.dispatchEvent(new CustomEvent('resetSimulation'));
     }
 };
