@@ -282,6 +282,37 @@ button:active {
     font-weight: 600;
 }
 
+/* Per-intersection stats overlay */
+#statsOverlay {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    pointer-events: none;
+    z-index: 5;
+}
+
+.int-stat {
+    position: absolute;
+    padding: 2px 8px;
+    background: rgba(10, 10, 20, 0.75);
+    border: 1px solid rgba(76, 175, 80, 0.6);
+    border-radius: 10px;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+    font-feature-settings: "tnum";
+}
+
+.int-stat.warn {
+    border-color: rgba(255, 235, 59, 0.7);
+}
+
+.int-stat.bad {
+    border-color: rgba(244, 67, 54, 0.8);
+    background: rgba(60, 10, 10, 0.8);
+}
+
 /* Modal */
 #modalOverlay {
     display: none;

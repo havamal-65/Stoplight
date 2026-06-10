@@ -2,6 +2,7 @@ import * as THREE from 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/thr
 import { CONFIG } from './Config.js';
 import { toggleDayNight } from './Renderer.js';
 import { GameManager } from './GameManager.js';
+import { toggleStatsOverlay } from './StatsOverlay.js';
 
 let camera, scene, renderer;
 let isDragging = false;
@@ -294,6 +295,12 @@ function setupUI() {
     // Sim Speed
     document.getElementById('simSpeed').addEventListener('input', (e) => {
         window.simSpeed = parseFloat(e.target.value);
+    });
+
+    // Toggle intersection stats overlay
+    document.getElementById('toggleStats').addEventListener('click', (e) => {
+        const on = toggleStatsOverlay();
+        e.target.textContent = on ? 'Hide Intersection Stats' : 'Show Intersection Stats';
     });
 
     // Toggle Day/Night

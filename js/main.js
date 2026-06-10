@@ -3,6 +3,7 @@ import { createGround, createCityGrid, spawnVehicles, updateTrafficLights, updat
 import { initInput } from './InputManager.js';
 import { GameManager } from './GameManager.js';
 import { initParticleSystem, updateParticles } from './ParticleSystem.js';
+import { initStatsOverlay, updateStatsOverlay } from './StatsOverlay.js';
 
 let simTime = 0;
 window.simSpeed = 1; // Global for access in InputManager
@@ -16,6 +17,7 @@ function init() {
     createCityGrid();
     spawnVehicles(30);
     initInput(renderer, scene, camera);
+    initStatsOverlay(camera);
     GameManager.init();
 
     // Listen for reset event
@@ -47,6 +49,7 @@ function animate(time = 0) {
     updateTrafficLights(delta);
     updateVehicles(delta);
     updateParticles(delta);
+    updateStatsOverlay(delta);
     GameManager.update(delta, vehicles);
     renderer.render(scene, camera);
 }
