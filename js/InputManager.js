@@ -232,25 +232,44 @@ function onTouchEnd(event) {
 // ============================================
 // UI
 // ============================================
+// Editor sliders mapped to per-intersection timing fields
+const TIMING_SLIDERS = [
+    { slider: 'nsGreenTime', value: 'nsGreenVal', field: 'nsGreen' },
+    { slider: 'ewGreenTime', value: 'ewGreenVal', field: 'ewGreen' },
+    { slider: 'yellowTime', value: 'yellowVal', field: 'yellow' },
+    { slider: 'allRedTime', value: 'allRedVal', field: 'allRed' }
+];
+
+function updateRedReadout(timings) {
+    // A direction's red lasts the opposing green + yellow + both clearances
+    const nsRed = timings.ewGreen + timings.yellow + timings.allRed * 2;
+    const ewRed = timings.nsGreen + timings.yellow + timings.allRed * 2;
+    document.getElementById('redReadout').innerHTML =
+        `Red (NS): ${nsRed}s &nbsp;·&nbsp; Red (EW): ${ewRed}s`;
+}
+
 function selectIntersection(data) {
     const editor = document.getElementById('editorPanel');
     editor.style.display = 'block';
+    document.body.classList.add('editor-open');
 
     // Position selection ring
     selectionRing.position.set(data.x, 0.5, data.z);
     selectionRing.visible = true;
 
     // Update UI values
-    document.getElementById('nsGreenTime').value = data.timings.nsGreen;
-    document.getElementById('nsGreenVal').textContent = data.timings.nsGreen;
-    document.getElementById('ewGreenTime').value = data.timings.ewGreen;
-    document.getElementById('ewGreenVal').textContent = data.timings.ewGreen;
+    TIMING_SLIDERS.forEach(({ slider, value, field }) => {
+        document.getElementById(slider).value = data.timings[field];
+        document.getElementById(value).textContent = data.timings[field];
+    });
+    updateRedReadout(data.timings);
 
     selectedIntersection = data;
 }
 
 function closeIntersectionEditor() {
     document.getElementById('editorPanel').style.display = 'none';
+    document.body.classList.remove('editor-open');
     selectionRing.visible = false;
     selectedIntersection = null;
 }
@@ -284,20 +303,15 @@ function setupUI() {
     document.getElementById('resetSim').addEventListener('click', () => GameManager.reset());
 
     // Editor Controls
-    document.getElementById('nsGreenTime').addEventListener('input', (e) => {
-        const val = parseInt(e.target.value);
-        document.getElementById('nsGreenVal').textContent = val;
-        if (selectedIntersection) {
-            selectedIntersection.timings.nsGreen = val;
-        }
-    });
-
-    document.getElementById('ewGreenTime').addEventListener('input', (e) => {
-        const val = parseInt(e.target.value);
-        document.getElementById('ewGreenVal').textContent = val;
-        if (selectedIntersection) {
-            selectedIntersection.timings.ewGreen = val;
-        }
+    TIMING_SLIDERS.forEach(({ slider, value, field }) => {
+        document.getElementById(slider).addEventListener('input', (e) => {
+            const val = parseInt(e.target.value);
+            document.getElementById(value).textContent = val;
+            if (selectedIntersection) {
+                selectedIntersection.timings[field] = val;
+                updateRedReadout(selectedIntersection.timings);
+            }
+        });
     });
 
     document.getElementById('closeEditor').addEventListener('click', closeIntersectionEditor);

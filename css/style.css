@@ -267,6 +267,21 @@ button:active {
     line-height: 1.4;
 }
 
+#editorPanel label {
+    display: block;
+    margin: 12px 0 6px;
+    font-size: 13px;
+    color: var(--text-muted);
+}
+
+/* Resulting red times (derived from the opposing green + yellow + clearance) */
+#redReadout {
+    margin: 14px 0 4px;
+    font-size: 13px;
+    color: var(--primary);
+    font-weight: 600;
+}
+
 /* Modal */
 #modalOverlay {
     display: none;
@@ -374,6 +389,11 @@ button:active {
         left: 12px;
         bottom: 12px;
         text-align: center;
+    }
+
+    /* The editor bottom sheet replaces the instructions while open */
+    body.editor-open #instructions {
+        display: none;
     }
 
     #modalTitle {

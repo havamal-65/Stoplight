@@ -60,11 +60,19 @@
         <h3>🚦 Intersection Control</h3>
         <p>Adjust signal timings for this intersection.</p>
 
-        <label>Green Light (NS): <span id="nsGreenVal">8</span>s</label>
-        <input type="range" id="nsGreenTime" min="3" max="20" value="8">
+        <label>Green (NS): <span id="nsGreenVal">8</span>s</label>
+        <input type="range" id="nsGreenTime" min="3" max="30" value="8">
 
-        <label>Green Light (EW): <span id="ewGreenVal">8</span>s</label>
-        <input type="range" id="ewGreenTime" min="3" max="20" value="8">
+        <label>Green (EW): <span id="ewGreenVal">8</span>s</label>
+        <input type="range" id="ewGreenTime" min="3" max="30" value="8">
+
+        <label>Yellow: <span id="yellowVal">2</span>s</label>
+        <input type="range" id="yellowTime" min="1" max="5" value="2">
+
+        <label>All-Red Clearance: <span id="allRedVal">1</span>s</label>
+        <input type="range" id="allRedTime" min="0" max="4" value="1">
+
+        <p id="redReadout">Red (NS): 12s &nbsp;·&nbsp; Red (EW): 12s</p>
 
         <button id="closeEditor">Close</button>
     </div>

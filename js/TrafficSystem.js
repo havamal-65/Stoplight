@@ -221,9 +221,10 @@ function createIntersection(x, z) {
     const timings = {
         nsGreen: CONFIG.LIGHT_DURATION.GREEN,
         ewGreen: CONFIG.LIGHT_DURATION.GREEN,
-        yellow: CONFIG.LIGHT_DURATION.YELLOW
+        yellow: CONFIG.LIGHT_DURATION.YELLOW,
+        allRed: CONFIG.LIGHT_DURATION.ALL_RED
     };
-    const cycle = timings.nsGreen + timings.ewGreen + (timings.yellow + CONFIG.LIGHT_DURATION.ALL_RED) * 2;
+    const cycle = timings.nsGreen + timings.ewGreen + (timings.yellow + timings.allRed) * 2;
     const intData = {
         x, z,
         cycleTime: Math.random() * cycle, // Random starting phase
@@ -607,10 +608,9 @@ export function spawnVehicles(count) {
 // TRAFFIC LOGIC
 // ============================================
 export function updateTrafficLights(delta) {
-    const allRed = CONFIG.LIGHT_DURATION.ALL_RED;
-
     intersections.forEach(intersection => {
         const t = intersection.timings;
+        const allRed = t.allRed;
 
         // Cycle: NS green | yellow | all-red | EW green | yellow | all-red
         const cycle = t.nsGreen + t.ewGreen + (t.yellow + allRed) * 2;
