@@ -256,6 +256,22 @@ function closeIntersectionEditor() {
 }
 
 function setupUI() {
+    // Collapsible stats panel (tap header to toggle); starts minimized on
+    // small screens where it would cover most of the view
+    const uiPanel = document.getElementById('ui');
+    const toggleBtn = document.getElementById('togglePanel');
+    const setCollapsed = (collapsed) => {
+        uiPanel.classList.toggle('collapsed', collapsed);
+        toggleBtn.textContent = collapsed ? '+' : '−';
+        toggleBtn.setAttribute('aria-label', collapsed ? 'Expand panel' : 'Minimize panel');
+    };
+    document.getElementById('uiHeader').addEventListener('click', () => {
+        setCollapsed(!uiPanel.classList.contains('collapsed'));
+    });
+    if (window.matchMedia('(max-width: 600px)').matches) {
+        setCollapsed(true);
+    }
+
     // Sim Speed
     document.getElementById('simSpeed').addEventListener('input', (e) => {
         window.simSpeed = parseFloat(e.target.value);
