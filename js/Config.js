@@ -11,6 +11,16 @@ export const CONFIG = {
         ALL_RED: 1      // Clearance interval between direction changes
     },
 
+    // Open street ends where traffic can leave/enter the map (highway
+    // ramps). All other street ends are barricaded. Sides: north = -z,
+    // south = +z, east = +x, west = -x; index = street number (0..GRID_SIZE).
+    EXITS: [
+        { side: 'north', index: 1 },
+        { side: 'east', index: 2 },
+        { side: 'south', index: 4 },
+        { side: 'west', index: 3 }
+    ],
+
     VEHICLE: {
         MAX_SPEED: 0.25,
         ACCELERATION: 0.008,

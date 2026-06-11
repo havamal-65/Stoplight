@@ -96,9 +96,12 @@ export function createCityGrid() {
         for (let j = 0; j <= CONFIG.GRID_SIZE; j++) {
             const x = -halfGrid + i * (CONFIG.BLOCK_SIZE + CONFIG.STREET_WIDTH);
             const z = -halfGrid + j * (CONFIG.BLOCK_SIZE + CONFIG.STREET_WIDTH);
-            createIntersection(x, z);
+            createIntersection(x, z, i, j);
         }
     }
+
+    // Exit ramps and barricades at the street ends
+    createMapEdges();
 
     // Create city blocks with buildings
     for (let i = 0; i < CONFIG.GRID_SIZE; i++) {
@@ -187,7 +190,7 @@ function createStreet(x, z, width, depth, direction) {
     }
 }
 
-function createIntersection(x, z) {
+function createIntersection(x, z, gridI, gridJ) {
     // Intersection asphalt
     const intGeo = new THREE.PlaneGeometry(CONFIG.STREET_WIDTH, CONFIG.STREET_WIDTH);
     const intMat = new THREE.MeshStandardMaterial({ color: 0x2a2a2a });
@@ -226,7 +229,7 @@ function createIntersection(x, z) {
     };
     const cycle = timings.nsGreen + timings.ewGreen + (timings.yellow + timings.allRed) * 2;
     const intData = {
-        x, z,
+        x, z, gridI, gridJ,
         cycleTime: Math.random() * cycle, // Random starting phase
         lights: [],
         timings,
@@ -308,6 +311,119 @@ function createTrafficLight(x, z, rotY) {
     group.rotation.y = rotY;
     scene.add(group);
     return { lights, mesh: group, state: 'red' };
+}
+
+// ============================================
+// MAP EDGES (exit ramps and barricades)
+// ============================================
+const exitSet = new Set(CONFIG.EXITS.map(e => `${e.side}:${e.index}`));
+
+function isExit(side, index) {
+    return exitSet.has(`${side}:${index}`);
+}
+
+function createMapEdges() {
+    const halfGrid = (CONFIG.GRID_SIZE * (CONFIG.BLOCK_SIZE + CONFIG.STREET_WIDTH)) / 2;
+    const endPos = halfGrid + CONFIG.STREET_WIDTH / 2;
+
+    for (let k = 0; k <= CONFIG.GRID_SIZE; k++) {
+        const streetPos = -halfGrid + k * (CONFIG.BLOCK_SIZE + CONFIG.STREET_WIDTH);
+        const ends = [
+            { side: 'north', x: streetPos, z: -endPos, rotY: 0 },
+            { side: 'south', x: streetPos, z: endPos, rotY: Math.PI },
+            { side: 'west', x: -endPos, z: streetPos, rotY: Math.PI / 2 },
+            { side: 'east', x: endPos, z: streetPos, rotY: -Math.PI / 2 }
+        ];
+        ends.forEach(end => {
+            if (isExit(end.side, k)) createExitSign(end.x, end.z, end.rotY);
+            else createBarrier(end.x, end.z, end.rotY);
+        });
+    }
+}
+
+let exitSignTexture = null;
+
+function createExitSign(x, z, rotY) {
+    if (!exitSignTexture) {
+        const canvas = document.createElement('canvas');
+        canvas.width = 256;
+        canvas.height = 96;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#1e7e34';
+        ctx.fillRect(0, 0, 256, 96);
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 5;
+        ctx.strokeRect(8, 8, 240, 80);
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 52px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('EXIT', 128, 52);
+        exitSignTexture = new THREE.CanvasTexture(canvas);
+    }
+
+    const group = new THREE.Group();
+
+    // Gantry posts on the sidewalk edges
+    const postGeo = new THREE.CylinderGeometry(0.15, 0.15, 6);
+    const postMat = new THREE.MeshStandardMaterial({ color: 0x444444 });
+    for (const px of [-CONFIG.STREET_WIDTH / 2 + 0.5, CONFIG.STREET_WIDTH / 2 - 0.5]) {
+        const post = new THREE.Mesh(postGeo, postMat);
+        post.position.set(px, 3, 0);
+        post.castShadow = true;
+        group.add(post);
+    }
+
+    // Overhead green panel, facing inbound traffic
+    const panel = new THREE.Mesh(
+        new THREE.PlaneGeometry(8, 3),
+        new THREE.MeshBasicMaterial({ map: exitSignTexture, side: THREE.DoubleSide })
+    );
+    panel.position.set(0, 5, 0);
+    group.add(panel);
+
+    group.position.set(x, 0, z);
+    group.rotation.y = rotY;
+    scene.add(group);
+}
+
+let barrierTexture = null;
+
+function createBarrier(x, z, rotY) {
+    if (!barrierTexture) {
+        const canvas = document.createElement('canvas');
+        canvas.width = 128;
+        canvas.height = 16;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#cc2222';
+        ctx.fillRect(0, 0, 128, 16);
+        ctx.fillStyle = '#ffffff';
+        for (let sx = 0; sx < 128; sx += 32) ctx.fillRect(sx, 0, 16, 16);
+        barrierTexture = new THREE.CanvasTexture(canvas);
+    }
+
+    const group = new THREE.Group();
+
+    const postGeo = new THREE.BoxGeometry(0.3, 1, 0.3);
+    const postMat = new THREE.MeshStandardMaterial({ color: 0x666666 });
+    for (const px of [-CONFIG.STREET_WIDTH / 2 + 0.6, 0, CONFIG.STREET_WIDTH / 2 - 0.6]) {
+        const post = new THREE.Mesh(postGeo, postMat);
+        post.position.set(px, 0.5, 0);
+        post.castShadow = true;
+        group.add(post);
+    }
+
+    // Striped crossbar spanning the street
+    const bar = new THREE.Mesh(
+        new THREE.BoxGeometry(CONFIG.STREET_WIDTH, 0.7, 0.25),
+        new THREE.MeshBasicMaterial({ map: barrierTexture })
+    );
+    bar.position.set(0, 1.1, 0);
+    group.add(bar);
+
+    group.position.set(x, 0, z);
+    group.rotation.y = rotY;
+    scene.add(group);
 }
 
 function createLowPolyTree(x, z) {
@@ -716,6 +832,73 @@ function normalizeAngle(angle) {
     return ((angle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
 }
 
+// Can a car leave this intersection with the given heading? Moving toward
+// another intersection is always fine; moving off the map requires an exit.
+function isMoveAllowed(intersection, heading) {
+    const di = Math.round(Math.sin(heading));
+    const dj = Math.round(Math.cos(heading));
+    const ni = intersection.gridI + di;
+    const nj = intersection.gridJ + dj;
+
+    if (ni >= 0 && ni <= CONFIG.GRID_SIZE && nj >= 0 && nj <= CONFIG.GRID_SIZE) return true;
+    if (ni > CONFIG.GRID_SIZE) return isExit('east', intersection.gridJ);
+    if (ni < 0) return isExit('west', intersection.gridJ);
+    if (nj > CONFIG.GRID_SIZE) return isExit('south', intersection.gridI);
+    return isExit('north', intersection.gridI);
+}
+
+// Pick where to go at an intersection: 0 = straight, 1/-1 = turn.
+// Straight is preferred ~70% of the time, but barricaded directions are
+// never chosen, so cars turn away from dead ends.
+function getTurnChoice(vehicle, intersection) {
+    const straightOk = isMoveAllowed(intersection, vehicle.heading);
+    const turns = [1, -1].filter(dir =>
+        isMoveAllowed(intersection, normalizeAngle(vehicle.heading + dir * Math.PI / 2)));
+
+    if (straightOk && (turns.length === 0 || Math.random() > 0.3)) return 0;
+    if (turns.length === 0) return 0;
+    return turns[Math.floor(Math.random() * turns.length)];
+}
+
+// Spawn pose for traffic entering the map through an exit ramp
+function entrancePose(side, index) {
+    const halfGrid = (CONFIG.GRID_SIZE * (CONFIG.BLOCK_SIZE + CONFIG.STREET_WIDTH)) / 2;
+    const streetPos = -halfGrid + index * (CONFIG.BLOCK_SIZE + CONFIG.STREET_WIDTH);
+    const edge = halfGrid + CONFIG.STREET_WIDTH / 2;
+    const laneOff = CONFIG.LANE_WIDTH * 0.75;
+
+    switch (side) {
+        case 'north': return { x: streetPos - laneOff, z: -edge, heading: 0 };
+        case 'south': return { x: streetPos + laneOff, z: edge, heading: Math.PI };
+        case 'west': return { x: -edge, z: streetPos + laneOff, heading: Math.PI / 2 };
+        case 'east': return { x: edge, z: streetPos - laneOff, heading: Math.PI * 1.5 };
+    }
+}
+
+// A car that left through an exit re-enters at a random (free) ramp
+function respawnAtEntrance(vehicle) {
+    const exits = [...CONFIG.EXITS].sort(() => Math.random() - 0.5);
+    let pose = null;
+    for (const exit of exits) {
+        const candidate = entrancePose(exit.side, exit.index);
+        if (isPositionFree(candidate.x, candidate.z, 5)) {
+            pose = candidate;
+            break;
+        }
+    }
+    if (!pose) pose = entrancePose(exits[0].side, exits[0].index);
+
+    vehicle.mesh.position.set(pose.x, 0, pose.z);
+    vehicle.mesh.rotation.y = pose.heading;
+    vehicle.heading = pose.heading;
+    vehicle.direction = Math.abs(Math.sin(pose.heading)) > 0.5 ? 'horizontal' : 'vertical';
+    vehicle.laneCoord = vehicle.direction === 'horizontal' ? pose.z : pose.x;
+    vehicle.turning = false;
+    vehicle.turn = null;
+    vehicle.inIntersection = null;
+    vehicle.speed = Math.min(vehicle.speed, vehicle.maxSpeed * 0.5);
+}
+
 // Begin a 90° turn through an intersection. The car follows a quadratic
 // bezier from its entry point to the right-hand lane of the cross street,
 // tangent to both lanes, so it ends exactly on the exit lane.
@@ -750,7 +933,7 @@ function startTurn(vehicle, intersection, turnDir) {
 
 export function updateVehicles(delta) {
     const halfGrid = (CONFIG.GRID_SIZE * (CONFIG.BLOCK_SIZE + CONFIG.STREET_WIDTH)) / 2;
-    const boundary = halfGrid + CONFIG.STREET_WIDTH;
+    const boundary = halfGrid + CONFIG.STREET_WIDTH / 2 + 2; // Just past the street end
 
     vehicles.forEach(vehicle => {
         // Check traffic light (skip while clearing an intersection)
@@ -805,10 +988,8 @@ export function updateVehicles(delta) {
             }
         }
         if (inside && vehicle.inIntersection !== inside && !vehicle.turning) {
-            const roll = Math.random();
-            if (roll < 0.3) {
-                startTurn(vehicle, inside, roll < 0.15 ? 1 : -1);
-            }
+            const turnDir = getTurnChoice(vehicle, inside);
+            if (turnDir !== 0) startTurn(vehicle, inside, turnDir);
         }
         vehicle.inIntersection = inside;
 
@@ -859,22 +1040,19 @@ export function updateVehicles(delta) {
             createExhaust(vehicle.mesh.position, vehicle.mesh.rotation.y);
         }
 
-        // Wrap around boundaries (Arrival Logic)
-        if (vehicle.mesh.position.x > boundary) {
-            vehicle.mesh.position.x = -boundary;
+        // Arrival: a car driving outward past a street end has left through
+        // an exit (barricades force turns everywhere else). It scores an
+        // arrival and re-enters at a ramp.
+        const pos = vehicle.mesh.position;
+        const exitedOutward =
+            (pos.x > boundary && Math.sin(vehicle.heading) > 0.5) ||
+            (pos.x < -boundary && Math.sin(vehicle.heading) < -0.5) ||
+            (pos.z > boundary && Math.cos(vehicle.heading) > 0.5) ||
+            (pos.z < -boundary && Math.cos(vehicle.heading) < -0.5);
+
+        if (exitedOutward) {
             GameManager.arrivedVehicles++;
-        }
-        if (vehicle.mesh.position.x < -boundary) {
-            vehicle.mesh.position.x = boundary;
-            GameManager.arrivedVehicles++;
-        }
-        if (vehicle.mesh.position.z > boundary) {
-            vehicle.mesh.position.z = -boundary;
-            GameManager.arrivedVehicles++;
-        }
-        if (vehicle.mesh.position.z < -boundary) {
-            vehicle.mesh.position.z = boundary;
-            GameManager.arrivedVehicles++;
+            respawnAtEntrance(vehicle);
         }
     });
 }
