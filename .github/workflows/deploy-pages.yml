@@ -1,0 +1,18 @@
+# Keeps the GitHub Pages demo in sync with main: every push to main is
+# mirrored to the gh-pages branch, which Pages serves.
+name: Deploy demo to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  mirror-to-gh-pages:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Push main to gh-pages
+        run: git push origin HEAD:gh-pages --force
