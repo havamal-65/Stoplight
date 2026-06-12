@@ -347,7 +347,10 @@ function createIntersection(x, z, gridI, gridJ) {
         cycleTime: Math.random() * cycle, // Random starting phase
         lights: [],
         timings,
-        mesh: intersection
+        mesh: intersection,
+        queueCount: 0,           // Stopped cars nearby (refreshed on demand)
+        throughputCount: 0,      // Cars through so far this light cycle
+        lastCycleThroughput: 0   // Cars through during the previous cycle
     };
 
     intersection.userData = { type: 'intersection', data: intData };
@@ -738,6 +741,21 @@ function isAreaFreeInGrid(x, z, radius) {
     return true;
 }
 
+// Refresh every intersection's queueCount (stopped cars within range)
+// in a single pass over the fleet. Called on demand by the UI.
+export function computeIntersectionQueues() {
+    const radiusSq = 24 * 24;
+    for (const intersection of intersections) intersection.queueCount = 0;
+    for (const v of vehicles) {
+        if (v.waitingToEnter || !v.stopped) continue;
+        const intersection = intersectionNear(v.position.x, v.position.z);
+        if (!intersection) continue;
+        const dx = v.position.x - intersection.x;
+        const dz = v.position.z - intersection.z;
+        if (dx * dx + dz * dz < radiusSq) intersection.queueCount++;
+    }
+}
+
 // O(1) lookup of the intersection nearest to a position (regular grid)
 function intersectionNear(x, z) {
     const spacing = CONFIG.BLOCK_SIZE + CONFIG.STREET_WIDTH;
@@ -863,7 +881,13 @@ export function updateTrafficLights(delta) {
 
         // Cycle: NS green | yellow | all-red | EW green | yellow | all-red
         const cycle = t.nsGreen + t.ewGreen + (t.yellow + allRed) * 2;
-        intersection.cycleTime = (intersection.cycleTime + delta) % cycle;
+        const prevCycleTime = intersection.cycleTime;
+        intersection.cycleTime = (prevCycleTime + delta) % cycle;
+        if (intersection.cycleTime < prevCycleTime) {
+            // Cycle completed: archive this cycle's throughput
+            intersection.lastCycleThroughput = intersection.throughputCount;
+            intersection.throughputCount = 0;
+        }
         const ct = intersection.cycleTime;
 
         let nsState = 'red';
@@ -1189,6 +1213,10 @@ export function updateVehicles(delta) {
             } else if (turnDir !== 0) {
                 startTurn(vehicle, inside, turnDir);
             }
+        }
+        // Leaving an intersection counts toward its throughput
+        if (vehicle.inIntersection && vehicle.inIntersection !== inside) {
+            vehicle.inIntersection.throughputCount++;
         }
         vehicle.inIntersection = inside;
 

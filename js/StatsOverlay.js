@@ -1,5 +1,5 @@
 import * as THREE from 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.module.js';
-import { intersections, vehicles } from './TrafficSystem.js';
+import { intersections, computeIntersectionQueues } from './TrafficSystem.js';
 
 let camera;
 let container;
@@ -7,7 +7,6 @@ let labels = [];
 let visible = false;
 let refreshTimer = 0;
 
-const QUEUE_RADIUS = 24;   // Vehicles stopped within this range count as queued
 const RECOUNT_INTERVAL = 0.25;
 
 export function initStatsOverlay(cameraInstance) {
@@ -41,19 +40,16 @@ export function updateStatsOverlay(delta) {
     // Queue counts refresh a few times a second; positions track every frame
     refreshTimer -= delta;
     const recount = refreshTimer <= 0;
-    if (recount) refreshTimer = RECOUNT_INTERVAL;
+    if (recount) {
+        refreshTimer = RECOUNT_INTERVAL;
+        computeIntersectionQueues();
+    }
 
     intersections.forEach((intersection, i) => {
         const el = labels[i];
 
         if (recount) {
-            let waiting = 0;
-            for (const v of vehicles) {
-                if (!v.stopped || v.waitingToEnter) continue;
-                const dx = v.position.x - intersection.x;
-                const dz = v.position.z - intersection.z;
-                if (dx * dx + dz * dz < QUEUE_RADIUS * QUEUE_RADIUS) waiting++;
-            }
+            const waiting = intersection.queueCount;
             el.textContent = `🚗 ${waiting}`;
             el.classList.toggle('warn', waiting >= 2 && waiting < 5);
             el.classList.toggle('bad', waiting >= 5);

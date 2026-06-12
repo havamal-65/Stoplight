@@ -51,6 +51,7 @@
             <label>Traffic Density</label>
             <input type="range" id="density" min="10" max="1000" step="10" value="30">
 
+            <button id="openEditor">🚦 Intersections</button>
             <button id="toggleStats">Show Intersection Stats</button>
             <button id="toggleTime">Toggle Day/Night</button>
             <button id="resetSim">Reset Simulation</button>
@@ -59,7 +60,14 @@
 
     <div id="editorPanel" class="glass-panel" style="display: none;">
         <h3>🚦 Intersection Control</h3>
-        <p>Adjust signal timings for this intersection.</p>
+
+        <div id="listControls">
+            <button id="selectAllInts" class="mini-button">Select All</button>
+            <button id="selectNoneInts" class="mini-button">Clear</button>
+            <span id="selectionCount">0 selected</span>
+        </div>
+        <div id="intersectionList"></div>
+        <p id="editorStats">No intersections selected</p>
 
         <label>Green (NS): <span id="nsGreenVal">8</span>s</label>
         <input type="range" id="nsGreenTime" min="3" max="30" value="8">

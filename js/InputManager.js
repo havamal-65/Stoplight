@@ -3,14 +3,19 @@ import { CONFIG } from './Config.js';
 import { toggleDayNight } from './Renderer.js';
 import { GameManager } from './GameManager.js';
 import { toggleStatsOverlay } from './StatsOverlay.js';
+import { intersections, computeIntersectionQueues } from './TrafficSystem.js';
 
 let camera, scene, renderer;
 let isDragging = false;
 let previousMousePosition = { x: 0, y: 0 };
 let raycaster = new THREE.Raycaster();
 let mouse = new THREE.Vector2();
-let selectionRing;
-let selectedIntersection = null;
+
+// Multi-selection of intersections, with one highlight ring each
+const selectedSet = new Set();
+const selectionRings = [];
+const listRows = []; // { checkbox, stats, data }
+let statsTimer = null;
 
 // Point the camera orbits around; moves when panning
 const cameraTarget = new THREE.Vector3(0, 0, 0);
@@ -28,13 +33,19 @@ export function initInput(rendererInstance, sceneInstance, cameraInstance) {
     scene = sceneInstance;
     camera = cameraInstance;
 
-    // Create selection ring
-    const ringGeo = new THREE.TorusGeometry(CONFIG.STREET_WIDTH / 2 + 1, 0.3, 16, 100);
+    // One selection ring per intersection (toggled with the selection)
+    const ringGeo = new THREE.TorusGeometry(CONFIG.STREET_WIDTH / 2 + 1, 0.3, 8, 48);
     const ringMat = new THREE.MeshBasicMaterial({ color: 0xffff00, transparent: true, opacity: 0.8 });
-    selectionRing = new THREE.Mesh(ringGeo, ringMat);
-    selectionRing.rotation.x = -Math.PI / 2;
-    selectionRing.visible = false;
-    scene.add(selectionRing);
+    intersections.forEach(data => {
+        const ring = new THREE.Mesh(ringGeo, ringMat);
+        ring.rotation.x = -Math.PI / 2;
+        ring.position.set(data.x, 0.5, data.z);
+        ring.visible = false;
+        scene.add(ring);
+        selectionRings.push(ring);
+    });
+
+    buildIntersectionList();
 
     // Event Listeners
     const canvas = renderer.domElement;
@@ -249,30 +260,105 @@ function updateRedReadout(timings) {
         `Red (NS): ${nsRed}s &nbsp;·&nbsp; Red (EW): ${ewRed}s`;
 }
 
-function selectIntersection(data) {
-    const editor = document.getElementById('editorPanel');
-    editor.style.display = 'block';
-    document.body.classList.add('editor-open');
+function ordinal(n) {
+    const suffixes = ['th', 'st', 'nd', 'rd'];
+    const v = n % 100;
+    return n + (suffixes[(v - 20) % 10] || suffixes[v] || suffixes[0]);
+}
 
-    // Position selection ring
-    selectionRing.position.set(data.x, 0.5, data.z);
-    selectionRing.visible = true;
+function intersectionName(data) {
+    return `${ordinal(data.gridI + 1)} Ave & ${ordinal(data.gridJ + 1)} St`;
+}
 
-    // Update UI values
-    TIMING_SLIDERS.forEach(({ slider, value, field }) => {
-        document.getElementById(slider).value = data.timings[field];
-        document.getElementById(value).textContent = data.timings[field];
+function buildIntersectionList() {
+    const list = document.getElementById('intersectionList');
+    intersections.forEach(data => {
+        const row = document.createElement('label');
+        row.className = 'int-row';
+
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.addEventListener('change', () => {
+            if (checkbox.checked) selectedSet.add(data);
+            else selectedSet.delete(data);
+            updateSelectionUI();
+        });
+
+        const name = document.createElement('span');
+        name.className = 'int-name';
+        name.textContent = intersectionName(data);
+
+        const stats = document.createElement('span');
+        stats.className = 'int-row-stats';
+
+        row.append(checkbox, name, stats);
+        list.appendChild(row);
+        listRows.push({ checkbox, stats, data });
     });
-    updateRedReadout(data.timings);
+}
 
-    selectedIntersection = data;
+function updateSelectionUI() {
+    intersections.forEach((data, i) => {
+        selectionRings[i].visible = selectedSet.has(data);
+    });
+    listRows.forEach(({ checkbox, data }) => {
+        checkbox.checked = selectedSet.has(data);
+    });
+    document.getElementById('selectionCount').textContent = `${selectedSet.size} selected`;
+
+    // Sliders reflect the first selected intersection's timings
+    const first = selectedSet.values().next().value;
+    if (first) {
+        TIMING_SLIDERS.forEach(({ slider, value, field }) => {
+            document.getElementById(slider).value = first.timings[field];
+            document.getElementById(value).textContent = first.timings[field];
+        });
+        updateRedReadout(first.timings);
+    }
+    refreshEditorStats();
+}
+
+function refreshEditorStats() {
+    computeIntersectionQueues();
+
+    let queued = 0;
+    let through = 0;
+    selectedSet.forEach(data => {
+        queued += data.queueCount;
+        through += data.lastCycleThroughput;
+    });
+    document.getElementById('editorStats').textContent = selectedSet.size
+        ? `Queued: ${queued} · Through last cycle: ${through}`
+        : 'No intersections selected';
+
+    listRows.forEach(({ stats, data }) => {
+        stats.textContent = `Q ${data.queueCount} · T ${data.lastCycleThroughput}`;
+    });
+}
+
+function openIntersectionEditor() {
+    document.getElementById('editorPanel').style.display = 'block';
+    document.body.classList.add('editor-open');
+    updateSelectionUI();
+    if (!statsTimer) statsTimer = setInterval(refreshEditorStats, 500);
+}
+
+function selectIntersection(data) {
+    selectedSet.clear();
+    selectedSet.add(data);
+    openIntersectionEditor();
 }
 
 function closeIntersectionEditor() {
     document.getElementById('editorPanel').style.display = 'none';
     document.body.classList.remove('editor-open');
-    selectionRing.visible = false;
-    selectedIntersection = null;
+    selectedSet.clear();
+    selectionRings.forEach(ring => { ring.visible = false; });
+    listRows.forEach(({ checkbox }) => { checkbox.checked = false; });
+    if (statsTimer) {
+        clearInterval(statsTimer);
+        statsTimer = null;
+    }
 }
 
 function setupUI() {
@@ -309,16 +395,28 @@ function setupUI() {
     // Reset
     document.getElementById('resetSim').addEventListener('click', () => GameManager.reset());
 
-    // Editor Controls
+    // Editor Controls: sliders apply to every selected intersection
     TIMING_SLIDERS.forEach(({ slider, value, field }) => {
         document.getElementById(slider).addEventListener('input', (e) => {
             const val = parseInt(e.target.value);
             document.getElementById(value).textContent = val;
-            if (selectedIntersection) {
-                selectedIntersection.timings[field] = val;
-                updateRedReadout(selectedIntersection.timings);
-            }
+            const first = selectedSet.values().next().value;
+            selectedSet.forEach(data => {
+                data.timings[field] = val;
+            });
+            if (first) updateRedReadout(first.timings);
         });
+    });
+
+    // Selection list controls
+    document.getElementById('openEditor').addEventListener('click', openIntersectionEditor);
+    document.getElementById('selectAllInts').addEventListener('click', () => {
+        intersections.forEach(data => selectedSet.add(data));
+        updateSelectionUI();
+    });
+    document.getElementById('selectNoneInts').addEventListener('click', () => {
+        selectedSet.clear();
+        updateSelectionUI();
     });
 
     document.getElementById('closeEditor').addEventListener('click', closeIntersectionEditor);
