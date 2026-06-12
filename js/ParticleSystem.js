@@ -1,59 +1,60 @@
 import * as THREE from 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.module.js';
 
-let scene;
+// Exhaust puffs live in a fixed-size InstancedMesh pool: one draw call,
+// no per-particle scene objects or material clones.
+const MAX_PARTICLES = 600;
+
+let mesh = null;
 const particles = [];
-const particleGeo = new THREE.BoxGeometry(0.3, 0.3, 0.3); // Low poly cubes
-const particleMat = new THREE.MeshBasicMaterial({ color: 0xaaaaaa, transparent: true, opacity: 0.8 });
+const dummy = new THREE.Object3D();
 
 export function initParticleSystem(sceneInstance) {
-    scene = sceneInstance;
+    const geo = new THREE.BoxGeometry(0.3, 0.3, 0.3); // Low poly cubes
+    const mat = new THREE.MeshBasicMaterial({ color: 0xaaaaaa, transparent: true, opacity: 0.6, depthWrite: false });
+    mesh = new THREE.InstancedMesh(geo, mat, MAX_PARTICLES);
+    mesh.frustumCulled = false;
+    mesh.count = 0;
+    sceneInstance.add(mesh);
 }
 
 export function createExhaust(position, direction) {
-    if (!scene) return;
-
-    const mesh = new THREE.Mesh(particleGeo, particleMat.clone());
-
-    // Position at the back of the car, slightly randomized
-    const offset = new THREE.Vector3(0, 0, -2.2); // Behind car
-    offset.applyAxisAngle(new THREE.Vector3(0, 1, 0), direction);
-
-    mesh.position.copy(position).add(offset);
-    mesh.position.y = 0.5; // Exhaust height
-
-    // Add some randomness
-    mesh.position.x += (Math.random() - 0.5) * 0.2;
-    mesh.position.z += (Math.random() - 0.5) * 0.2;
-
-    mesh.rotation.x = Math.random() * Math.PI;
-    mesh.rotation.y = Math.random() * Math.PI;
-
-    scene.add(mesh);
+    if (!mesh || particles.length >= MAX_PARTICLES) return;
 
     particles.push({
-        mesh,
+        // Behind the car, slightly randomized
+        x: position.x - Math.sin(direction) * 2.2 + (Math.random() - 0.5) * 0.2,
+        y: 0.5, // Exhaust height
+        z: position.z - Math.cos(direction) * 2.2 + (Math.random() - 0.5) * 0.2,
+        rotX: Math.random() * Math.PI,
+        rotY: Math.random() * Math.PI,
         life: 1.0, // 1 second life
-        velocity: new THREE.Vector3(0, 0.5 + Math.random() * 0.5, 0) // Float up
+        velocityY: 0.5 + Math.random() * 0.5 // Float up
     });
 }
 
 export function updateParticles(delta) {
+    if (!mesh) return;
+
     for (let i = particles.length - 1; i >= 0; i--) {
         const p = particles[i];
         p.life -= delta;
-
         if (p.life <= 0) {
-            scene.remove(p.mesh);
-            p.mesh.material.dispose();
-            particles.splice(i, 1);
+            // Swap-remove keeps the array dense
+            particles[i] = particles[particles.length - 1];
+            particles.pop();
         } else {
-            // Move up
-            p.mesh.position.add(p.velocity.clone().multiplyScalar(delta));
-            // Fade out
-            p.mesh.material.opacity = p.life;
-            // Shrink
-            const scale = p.life;
-            p.mesh.scale.set(scale, scale, scale);
+            p.y += p.velocityY * delta;
         }
     }
+
+    for (let i = 0; i < particles.length; i++) {
+        const p = particles[i];
+        dummy.position.set(p.x, p.y, p.z);
+        dummy.rotation.set(p.rotX, p.rotY, 0);
+        dummy.scale.setScalar(Math.max(p.life, 0.01)); // Shrink as it fades
+        dummy.updateMatrix();
+        mesh.setMatrixAt(i, dummy.matrix);
+    }
+    mesh.count = particles.length;
+    mesh.instanceMatrix.needsUpdate = true;
 }

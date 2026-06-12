@@ -49,9 +49,9 @@ export function updateStatsOverlay(delta) {
         if (recount) {
             let waiting = 0;
             for (const v of vehicles) {
-                if (!v.stopped) continue;
-                const dx = v.mesh.position.x - intersection.x;
-                const dz = v.mesh.position.z - intersection.z;
+                if (!v.stopped || v.waitingToEnter) continue;
+                const dx = v.position.x - intersection.x;
+                const dz = v.position.z - intersection.z;
                 if (dx * dx + dz * dz < QUEUE_RADIUS * QUEUE_RADIUS) waiting++;
             }
             el.textContent = `🚗 ${waiting}`;

@@ -15,9 +15,17 @@ export const GameManager = {
     update: function (delta, vehicles) {
         if (this.state !== 'playing') return;
 
-        // Calculate efficiency based on stopped vehicles and flow
-        const stoppedCount = vehicles.filter(v => v.stopped).length;
-        const total = vehicles.length || 1;
+        // Single pass over the fleet; cars queued at the ramps don't count
+        let active = 0;
+        let stoppedCount = 0;
+        let speedSum = 0;
+        for (const v of vehicles) {
+            if (v.waitingToEnter) continue;
+            active++;
+            speedSum += v.speed;
+            if (v.stopped) stoppedCount++;
+        }
+        const total = active || 1;
 
         // Decay efficiency if traffic is stopped
         if (stoppedCount > 0) {
@@ -36,16 +44,13 @@ export const GameManager = {
         if (arrEl) arrEl.textContent = this.arrivedVehicles;
 
         const countEl = document.getElementById('vehicleCount');
-        if (countEl) countEl.textContent = vehicles.length;
+        if (countEl) countEl.textContent = active;
 
         const stoppedEl = document.getElementById('stoppedCount');
         if (stoppedEl) stoppedEl.textContent = stoppedCount;
 
         const avgEl = document.getElementById('avgSpeed');
-        if (avgEl) {
-            const avgSpeed = vehicles.reduce((sum, v) => sum + v.speed, 0) / total;
-            avgEl.textContent = Math.round(avgSpeed * 100);
-        }
+        if (avgEl) avgEl.textContent = Math.round((speedSum / total) * 100);
 
         // Color code efficiency
         if (effEl) {
