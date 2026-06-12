@@ -796,6 +796,7 @@ function makeVehicle(type) {
         laneIndex: 0,          // 0 = inner lane, 1 = curb lane
         turning: false,
         turn: null,
+        pendingTurn: null,     // Committed turn waiting for a safe gap
         inIntersection: null,
         stopped: false,
         stuckTime: 0,
@@ -1061,6 +1062,40 @@ function turnExitLaneIndex(turnDir) {
     return turnDir === -1 ? 1 : 0;
 }
 
+// Unprotected left turns yield to oncoming traffic: conflict if any
+// MOVING oncoming car is inside the box or approaching within range.
+// Stopped oncoming traffic is ignored — waiting on stopped cars would
+// recreate deadlock cycles; if they pull away mid-turn they brake for
+// the turner via the wide-profile yield.
+function hasOncomingConflict(vehicle, intersection) {
+    const fx = Math.sin(vehicle.heading);
+    const fz = Math.cos(vehicle.heading);
+    const range = 26;
+    const minCX = Math.floor((intersection.x - range) / CELL_SIZE);
+    const maxCX = Math.floor((intersection.x + range) / CELL_SIZE);
+    const minCZ = Math.floor((intersection.z - range) / CELL_SIZE);
+    const maxCZ = Math.floor((intersection.z + range) / CELL_SIZE);
+
+    for (let cx = minCX; cx <= maxCX; cx++) {
+        for (let cz = minCZ; cz <= maxCZ; cz++) {
+            const cell = spatialGrid.get((cx + 512) * 1024 + (cz + 512));
+            if (!cell) continue;
+            for (const other of cell) {
+                if (other === vehicle || other.turning) continue;
+                if (other.speed < 0.03) continue;
+                if (fx * other.dirX + fz * other.dirZ > -0.5) continue; // Not oncoming
+
+                // In the box, or on the far side approaching it
+                const dx = other.position.x - intersection.x;
+                const dz = other.position.z - intersection.z;
+                const along = fx * dx + fz * dz;
+                if (along > -6 && along < range) return true;
+            }
+        }
+    }
+    return false;
+}
+
 // Would a turn end on top of parked traffic? Cars must not start turns
 // they can't finish — a turner stalled mid-box wedges the intersection.
 function turnExitBlocked(vehicle, intersection, turnDir) {
@@ -1161,6 +1196,7 @@ function tryEnterMap(vehicle) {
             vehicle.laneIndex = laneIndex;
             vehicle.turning = false;
             vehicle.turn = null;
+            vehicle.pendingTurn = null;
             vehicle.inIntersection = null;
             vehicle.stopped = false;
             vehicle.stuckTime = 0;
@@ -1264,14 +1300,39 @@ export function updateVehicles(delta) {
             inside = null;
         }
         if (inside && vehicle.inIntersection !== inside && !vehicle.turning) {
-            const turnDir = getTurnChoice(vehicle, inside);
-            if (turnDir === null) {
+            // A turner that had to yield stays committed to its choice
+            // instead of re-rolling every frame
+            const decision = (vehicle.pendingTurn && vehicle.pendingTurn.intersection === inside)
+                ? vehicle.pendingTurn.dir
+                : getTurnChoice(vehicle, inside);
+
+            if (decision === 1 || decision === -1) {
+                const mustYield = turnExitBlocked(vehicle, inside, decision) ||
+                    (decision === 1 && hasOncomingConflict(vehicle, inside));
+                if (mustYield) {
+                    if (!vehicle.pendingTurn || vehicle.pendingTurn.intersection !== inside) {
+                        vehicle.pendingTurn = { intersection: inside, dir: decision, waited: 0 };
+                    }
+                    vehicle.pendingTurn.waited += delta;
+                    if (vehicle.pendingTurn.waited > 8 && isMoveAllowed(inside, vehicle.heading)) {
+                        // No gap is coming: give up and continue straight
+                        vehicle.pendingTurn = null;
+                    } else {
+                        // Wait at the line for a gap; re-evaluate next frame
+                        shouldStop = true;
+                        inside = null;
+                    }
+                } else {
+                    vehicle.pendingTurn = null;
+                    startTurn(vehicle, inside, decision);
+                }
+            } else if (decision === null) {
                 // Dead end with every exit lane full: hold at the line and
                 // re-evaluate next frame
                 shouldStop = true;
                 inside = null;
-            } else if (turnDir !== 0) {
-                startTurn(vehicle, inside, turnDir);
+            } else {
+                vehicle.pendingTurn = null;
             }
         }
         // Leaving an intersection counts toward its throughput
