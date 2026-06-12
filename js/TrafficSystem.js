@@ -680,13 +680,21 @@ const VehicleType = {
     }
 };
 
-function isPositionFree(x, z, radius = 4) {
-    const radiusSq = radius * radius;
-    for (const vehicle of vehicles) {
-        if (vehicle.waitingToEnter) continue;
-        const dx = vehicle.position.x - x;
-        const dz = vehicle.position.z - z;
-        if (dx * dx + dz * dz < radiusSq) return false;
+// Each direction has two lanes: inner (next to the center line) and
+// outer (curb side). Offsets are distances from the street center.
+const LANE_OFFSETS = [CONFIG.LANE_WIDTH * 0.5, CONFIG.LANE_WIDTH * 1.5];
+
+// Is a lane spot free? Axis-aware: blocks only on cars in the same lane
+// (lateral tolerance) within the given ahead/behind window. Used at spawn
+// time, before the spatial grid exists.
+function isSpawnSpotFree(x, z, fx, fz) {
+    for (const other of vehicles) {
+        if (other.waitingToEnter) continue;
+        const dx = other.position.x - x;
+        const dz = other.position.z - z;
+        const along = fx * dx + fz * dz;
+        const lat = Math.abs(-fz * dx + fx * dz);
+        if (lat < 2.4 && Math.abs(along) < 5.5) return false;
     }
     return true;
 }
@@ -720,9 +728,11 @@ function buildSpatialGrid() {
     }
 }
 
-// Is a circle around (x, z) free of active vehicles? Grid-accelerated.
-function isAreaFreeInGrid(x, z, radius) {
-    const radiusSq = radius * radius;
+// Is the lane stretch around (x, z) clear of active vehicles? `ahead` and
+// `behind` are along the (fx, fz) direction; lateral tolerance keeps the
+// check to a single lane. Grid-accelerated.
+function isLaneClear(x, z, fx, fz, ahead, behind, latTolerance = 2.4) {
+    const radius = Math.max(ahead, behind) + latTolerance;
     const minCX = Math.floor((x - radius) / CELL_SIZE);
     const maxCX = Math.floor((x + radius) / CELL_SIZE);
     const minCZ = Math.floor((z - radius) / CELL_SIZE);
@@ -734,7 +744,9 @@ function isAreaFreeInGrid(x, z, radius) {
             for (const other of cell) {
                 const dx = other.position.x - x;
                 const dz = other.position.z - z;
-                if (dx * dx + dz * dz < radiusSq) return false;
+                const along = fx * dx + fz * dz;
+                const lat = Math.abs(-fz * dx + fx * dz);
+                if (lat < latTolerance && along > -behind && along < ahead) return false;
             }
         }
     }
@@ -780,7 +792,8 @@ function makeVehicle(type) {
         targetSpeed: CONFIG.VEHICLE.MAX_SPEED,
         direction: 'vertical',
         heading: 0,            // Exact cardinal yaw in [0, 2π)
-        laneCoord: 0,          // Fixed lateral coordinate of the lane
+        laneCoord: 0,          // Lateral coordinate of the current lane
+        laneIndex: 0,          // 0 = inner lane, 1 = curb lane
         turning: false,
         turn: null,
         inIntersection: null,
@@ -819,9 +832,10 @@ export function spawnVehicles(count) {
         // Position along the street
         const alongStreet = (Math.random() - 0.5) * (CONFIG.GRID_SIZE * (CONFIG.BLOCK_SIZE + CONFIG.STREET_WIDTH));
 
-        // Travel direction along the street (-1 or 1)
+        // Travel direction along the street (-1 or 1) and one of two lanes
         const laneDirection = Math.random() > 0.5 ? 1 : -1;
-        const laneOffsetMag = CONFIG.LANE_WIDTH * 0.75;
+        const laneIndex = Math.random() < 0.5 ? 0 : 1;
+        const laneOffsetMag = LANE_OFFSETS[laneIndex];
 
         // Right-hand traffic: lane offset sits on the right side of the
         // heading (offset = heading rotated -90°), matching startTurn().
@@ -837,7 +851,7 @@ export function spawnVehicles(count) {
         }
 
         // Check for collision (leave a workable gap so traffic can move)
-        if (!isPositionFree(x, z, 5.5)) continue;
+        if (!isSpawnSpotFree(x, z, Math.sin(heading), Math.cos(heading))) continue;
 
         const vehicle = makeVehicle(type);
         vehicle.position.set(x, 0, z);
@@ -845,6 +859,7 @@ export function spawnVehicles(count) {
         vehicle.heading = heading;
         vehicle.direction = isHorizontal ? 'horizontal' : 'vertical';
         vehicle.laneCoord = isHorizontal ? z : x;
+        vehicle.laneIndex = laneIndex;
 
         vehicles.push(vehicle);
         spawned++;
@@ -1040,44 +1055,82 @@ function isMoveAllowed(intersection, heading) {
     return isExit('north', intersection.gridI);
 }
 
+// Exit lane for a turn: right turns (-1) sweep into the curb lane,
+// left turns (+1) into the inner lane
+function turnExitLaneIndex(turnDir) {
+    return turnDir === -1 ? 1 : 0;
+}
+
 // Would a turn end on top of parked traffic? Cars must not start turns
 // they can't finish — a turner stalled mid-box wedges the intersection.
 function turnExitBlocked(vehicle, intersection, turnDir) {
     const exitHeading = normalizeAngle(vehicle.heading + turnDir * Math.PI / 2);
     const fx = Math.sin(exitHeading);
     const fz = Math.cos(exitHeading);
-    const laneOff = CONFIG.LANE_WIDTH * 0.75;
+    const laneOff = LANE_OFFSETS[turnExitLaneIndex(turnDir)];
     const laneX = intersection.x - Math.cos(exitHeading) * laneOff;
     const laneZ = intersection.z + Math.sin(exitHeading) * laneOff;
-    // Two landing spots must be clear: room to land AND roll out
-    const near = CONFIG.STREET_WIDTH / 2 + 2.5;
-    const far = CONFIG.STREET_WIDTH / 2 + 7.5;
-    return !isAreaFreeInGrid(laneX + fx * near, laneZ + fz * near, 5) ||
-        !isAreaFreeInGrid(laneX + fx * far, laneZ + fz * far, 4);
+    // The landing stretch just past the box must have room to land and roll out
+    const edge = CONFIG.STREET_WIDTH / 2;
+    return !isLaneClear(laneX + fx * edge, laneZ + fz * edge, fx, fz, 10, 1);
 }
 
 // Pick where to go at an intersection: 0 = straight, 1/-1 = turn, null =
 // wait at the line (dead end with every exit blocked). Straight is
 // preferred ~70% of the time; barricaded directions are never chosen, so
 // cars turn away from dead ends; blocked exit lanes are never turned into.
+// Lane discipline: right turns from the curb lane, left turns from the
+// inner lane — broken only when a dead end forces it.
 function getTurnChoice(vehicle, intersection) {
     const straightOk = isMoveAllowed(intersection, vehicle.heading);
     const turns = [1, -1].filter(dir =>
         isMoveAllowed(intersection, normalizeAngle(vehicle.heading + dir * Math.PI / 2)) &&
         !turnExitBlocked(vehicle, intersection, dir));
 
-    if (straightOk && (turns.length === 0 || Math.random() > 0.3)) return 0;
-    if (turns.length > 0) return turns[Math.floor(Math.random() * turns.length)];
+    const laneAppropriate = turns.filter(dir =>
+        (dir === -1 && vehicle.laneIndex === 1) || (dir === 1 && vehicle.laneIndex === 0));
+    const candidates = (laneAppropriate.length === 0 && !straightOk) ? turns : laneAppropriate;
+
+    if (straightOk && (candidates.length === 0 || Math.random() > 0.3)) return 0;
+    if (candidates.length > 0) return candidates[Math.floor(Math.random() * candidates.length)];
     if (straightOk) return 0;
     return null;
 }
 
+// Overtake: hop to the adjacent same-direction lane when impeded, if it
+// has room. Only mid-block, never on intersection approaches.
+function tryLaneChange(vehicle) {
+    const spacing = CONFIG.BLOCK_SIZE + CONFIG.STREET_WIDTH;
+    const halfGrid = (CONFIG.GRID_SIZE * spacing) / 2;
+
+    const nearInt = intersectionNear(vehicle.position.x, vehicle.position.z);
+    if (nearInt) {
+        const along = vehicle.direction === 'horizontal'
+            ? Math.abs(nearInt.x - vehicle.position.x)
+            : Math.abs(nearInt.z - vehicle.position.z);
+        if (along < 14) return;
+    }
+
+    const streetPos = -halfGrid + Math.round((vehicle.laneCoord + halfGrid) / spacing) * spacing;
+    const side = Math.sign(vehicle.laneCoord - streetPos) || 1;
+    const targetIndex = vehicle.laneIndex === 0 ? 1 : 0;
+    const target = streetPos + side * LANE_OFFSETS[targetIndex];
+
+    const fx = Math.sin(vehicle.heading);
+    const fz = Math.cos(vehicle.heading);
+    const tx = vehicle.direction === 'horizontal' ? vehicle.position.x : target;
+    const tz = vehicle.direction === 'horizontal' ? target : vehicle.position.z;
+    if (!isLaneClear(tx, tz, fx, fz, 10, 6)) return;
+
+    vehicle.laneCoord = target;
+    vehicle.laneIndex = targetIndex;
+}
+
 // Spawn pose for traffic entering the map through an exit ramp
-function entrancePose(side, index) {
+function entrancePose(side, index, laneOff) {
     const halfGrid = (CONFIG.GRID_SIZE * (CONFIG.BLOCK_SIZE + CONFIG.STREET_WIDTH)) / 2;
     const streetPos = -halfGrid + index * (CONFIG.BLOCK_SIZE + CONFIG.STREET_WIDTH);
     const edge = halfGrid + CONFIG.STREET_WIDTH / 2;
-    const laneOff = CONFIG.LANE_WIDTH * 0.75;
 
     switch (side) {
         case 'north': return { x: streetPos - laneOff, z: -edge, heading: 0 };
@@ -1092,24 +1145,30 @@ function entrancePose(side, index) {
 // at the ramps when the map is crowded.
 function tryEnterMap(vehicle) {
     const exits = [...CONFIG.EXITS].sort(() => Math.random() - 0.5);
+    const lanes = Math.random() < 0.5 ? [0, 1] : [1, 0];
     for (const exit of exits) {
-        const pose = entrancePose(exit.side, exit.index);
-        if (!isAreaFreeInGrid(pose.x, pose.z, 6)) continue;
+        for (const laneIndex of lanes) {
+            const pose = entrancePose(exit.side, exit.index, LANE_OFFSETS[laneIndex]);
+            const fx = Math.sin(pose.heading);
+            const fz = Math.cos(pose.heading);
+            if (!isLaneClear(pose.x, pose.z, fx, fz, 8, 2)) continue;
 
-        vehicle.position.set(pose.x, 0, pose.z);
-        vehicle.rotationY = pose.heading;
-        vehicle.heading = pose.heading;
-        vehicle.direction = Math.abs(Math.sin(pose.heading)) > 0.5 ? 'horizontal' : 'vertical';
-        vehicle.laneCoord = vehicle.direction === 'horizontal' ? pose.z : pose.x;
-        vehicle.turning = false;
-        vehicle.turn = null;
-        vehicle.inIntersection = null;
-        vehicle.stopped = false;
-        vehicle.stuckTime = 0;
-        vehicle.speed = vehicle.maxSpeed * 0.3;
-        vehicle.waitingToEnter = false;
-        insertIntoGrid(vehicle); // Visible to later entrants this frame
-        return true;
+            vehicle.position.set(pose.x, 0, pose.z);
+            vehicle.rotationY = pose.heading;
+            vehicle.heading = pose.heading;
+            vehicle.direction = Math.abs(Math.sin(pose.heading)) > 0.5 ? 'horizontal' : 'vertical';
+            vehicle.laneCoord = vehicle.direction === 'horizontal' ? pose.z : pose.x;
+            vehicle.laneIndex = laneIndex;
+            vehicle.turning = false;
+            vehicle.turn = null;
+            vehicle.inIntersection = null;
+            vehicle.stopped = false;
+            vehicle.stuckTime = 0;
+            vehicle.speed = vehicle.maxSpeed * 0.3;
+            vehicle.waitingToEnter = false;
+            insertIntoGrid(vehicle); // Visible to later entrants this frame
+            return true;
+        }
     }
     return false;
 }
@@ -1121,10 +1180,11 @@ function startTurn(vehicle, intersection, turnDir) {
     const exitHeading = normalizeAngle(vehicle.heading + turnDir * Math.PI / 2);
     const fx = Math.sin(exitHeading);
     const fz = Math.cos(exitHeading);
-    const laneOffsetMag = CONFIG.LANE_WIDTH * 0.75;
+    const exitLaneIndex = turnExitLaneIndex(turnDir);
+    const laneOffsetMag = LANE_OFFSETS[exitLaneIndex];
     const halfInt = CONFIG.STREET_WIDTH / 2;
 
-    // Right-hand lane of the exit street (offset = heading rotated -90°)
+    // Right-hand-side lane of the exit street (offset = heading rotated -90°)
     const laneX = intersection.x - Math.cos(exitHeading) * laneOffsetMag;
     const laneZ = intersection.z + Math.sin(exitHeading) * laneOffsetMag;
 
@@ -1140,7 +1200,7 @@ function startTurn(vehicle, intersection, turnDir) {
 
     vehicle.turning = true;
     vehicle.turn = {
-        p0, p1, ctrl, exitHeading,
+        p0, p1, ctrl, exitHeading, exitLaneIndex,
         length: p0.distanceTo(ctrl) + ctrl.distanceTo(p1),
         t: 0
     };
@@ -1220,6 +1280,13 @@ export function updateVehicles(delta) {
         }
         vehicle.inIntersection = inside;
 
+        // Overtake into the other lane when impeded mid-block
+        if (!vehicle.turning && !inside && vehicle.speed > 0.02 &&
+            distAhead < 14 && vehicle.targetSpeed < vehicle.maxSpeed * 0.7 &&
+            Math.random() < delta * 2) {
+            tryLaneChange(vehicle);
+        }
+
         // Track how long we've been stuck (drives the gridlock relief
         // valve). Hysteresis: nano-creep must not reset the timer.
         if (vehicle.speed < 0.02) vehicle.stuckTime += delta;
@@ -1269,17 +1336,27 @@ export function updateVehicles(delta) {
                 vehicle.rotationY = turn.exitHeading;
                 vehicle.direction = Math.abs(Math.sin(turn.exitHeading)) > 0.5 ? 'horizontal' : 'vertical';
                 vehicle.laneCoord = vehicle.direction === 'horizontal' ? turn.p1.z : turn.p1.x;
+                vehicle.laneIndex = turn.exitLaneIndex;
             }
         } else {
             vehicle.position.x += Math.sin(vehicle.heading) * step;
             vehicle.position.z += Math.cos(vehicle.heading) * step;
-            vehicle.rotationY = vehicle.heading;
 
-            // Keep the car centered in its lane
-            if (vehicle.direction === 'horizontal') {
-                vehicle.position.z = vehicle.laneCoord;
+            // Glide toward the lane center (capped at ~24° of crab angle,
+            // so lane changes are gradual and stopped cars don't slide)
+            const lateralAxis = vehicle.direction === 'horizontal' ? 'z' : 'x';
+            const lat = vehicle.position[lateralAxis];
+            const maxShift = step * 0.45;
+            const dLat = Math.max(-maxShift, Math.min(maxShift, vehicle.laneCoord - lat));
+            vehicle.position[lateralAxis] = lat + dLat;
+
+            // Face along the actual velocity so lane changes read visually
+            if (step > 0.0001 && dLat !== 0) {
+                const vx = Math.sin(vehicle.heading) * step + (lateralAxis === 'x' ? dLat : 0);
+                const vz = Math.cos(vehicle.heading) * step + (lateralAxis === 'z' ? dLat : 0);
+                vehicle.rotationY = Math.atan2(vx, vz);
             } else {
-                vehicle.position.x = vehicle.laneCoord;
+                vehicle.rotationY = vehicle.heading;
             }
         }
 
