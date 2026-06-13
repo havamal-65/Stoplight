@@ -28,24 +28,35 @@ let lastPinchMid = { x: 0, y: 0 };
 let touchStart = { x: 0, y: 0, time: 0 };
 let touchMoved = false;
 
-export function initInput(rendererInstance, sceneInstance, cameraInstance) {
+let gridUIEnabled = true;
+
+export function initInput(rendererInstance, sceneInstance, cameraInstance, options = {}) {
     renderer = rendererInstance;
     scene = sceneInstance;
     camera = cameraInstance;
+    gridUIEnabled = (options.cityMode || 'grid') === 'grid';
 
-    // One selection ring per intersection (toggled with the selection)
-    const ringGeo = new THREE.TorusGeometry(CONFIG.STREET_WIDTH / 2 + 1, 0.3, 8, 48);
-    const ringMat = new THREE.MeshBasicMaterial({ color: 0xffff00, transparent: true, opacity: 0.8 });
-    intersections.forEach(data => {
-        const ring = new THREE.Mesh(ringGeo, ringMat);
-        ring.rotation.x = -Math.PI / 2;
-        ring.position.set(data.x, 0.5, data.z);
-        ring.visible = false;
-        scene.add(ring);
-        selectionRings.push(ring);
-    });
-
-    buildIntersectionList();
+    // The intersection editor/overlay are grid-engine features; the varied
+    // city runs without them for now (its junctions aren't grid intersections).
+    if (gridUIEnabled) {
+        const ringGeo = new THREE.TorusGeometry(CONFIG.STREET_WIDTH / 2 + 1, 0.3, 8, 48);
+        const ringMat = new THREE.MeshBasicMaterial({ color: 0xffff00, transparent: true, opacity: 0.8 });
+        intersections.forEach(data => {
+            const ring = new THREE.Mesh(ringGeo, ringMat);
+            ring.rotation.x = -Math.PI / 2;
+            ring.position.set(data.x, 0.5, data.z);
+            ring.visible = false;
+            scene.add(ring);
+            selectionRings.push(ring);
+        });
+        buildIntersectionList();
+    } else {
+        // Hide grid-only controls in the varied city
+        const openBtn = document.getElementById('openEditor');
+        const statsBtn = document.getElementById('toggleStats');
+        if (openBtn) openBtn.style.display = 'none';
+        if (statsBtn) statsBtn.style.display = 'none';
+    }
 
     // Event Listeners
     const canvas = renderer.domElement;
@@ -118,6 +129,7 @@ function zoomCamera(factor) {
 }
 
 function trySelect(clientX, clientY) {
+    if (!gridUIEnabled) return; // no intersection editor in the varied city
     const rect = renderer.domElement.getBoundingClientRect();
     mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
     mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
@@ -378,24 +390,35 @@ function setupUI() {
         setCollapsed(true);
     }
 
+    // City switcher (reloads with the chosen city)
+    const citySelect = document.getElementById('citySelect');
+    if (citySelect) {
+        const current = new URLSearchParams(location.search).get('city') === 'new' ? 'new' : 'grid';
+        citySelect.value = current;
+        citySelect.addEventListener('change', (e) => {
+            const params = new URLSearchParams(location.search);
+            if (e.target.value === 'new') params.set('city', 'new'); else params.delete('city');
+            location.search = params.toString();
+        });
+    }
+
     // Sim Speed
     document.getElementById('simSpeed').addEventListener('input', (e) => {
         window.simSpeed = parseFloat(e.target.value);
     });
 
-    // Toggle intersection stats overlay
+    // Toggle Day/Night + Reset (both cities)
+    document.getElementById('toggleTime').addEventListener('click', toggleDayNight);
+    document.getElementById('resetSim').addEventListener('click', () => GameManager.reset());
+
+    // Grid-only UI: intersection stats overlay + editor
+    if (!gridUIEnabled) return;
+
     document.getElementById('toggleStats').addEventListener('click', (e) => {
         const on = toggleStatsOverlay();
         e.target.textContent = on ? 'Hide Intersection Stats' : 'Show Intersection Stats';
     });
 
-    // Toggle Day/Night
-    document.getElementById('toggleTime').addEventListener('click', toggleDayNight);
-
-    // Reset
-    document.getElementById('resetSim').addEventListener('click', () => GameManager.reset());
-
-    // Editor Controls: sliders apply to every selected intersection
     TIMING_SLIDERS.forEach(({ slider, value, field }) => {
         document.getElementById(slider).addEventListener('input', (e) => {
             const val = parseInt(e.target.value);
@@ -408,7 +431,6 @@ function setupUI() {
         });
     });
 
-    // Selection list controls
     document.getElementById('openEditor').addEventListener('click', openIntersectionEditor);
     document.getElementById('selectAllInts').addEventListener('click', () => {
         intersections.forEach(data => selectedSet.add(data));
@@ -418,6 +440,5 @@ function setupUI() {
         selectedSet.clear();
         updateSelectionUI();
     });
-
     document.getElementById('closeEditor').addEventListener('click', closeIntersectionEditor);
 }

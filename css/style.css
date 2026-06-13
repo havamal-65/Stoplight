@@ -172,6 +172,23 @@ input[type="range"]::-webkit-slider-thumb:hover {
     box-shadow: 0 0 15px rgba(79, 195, 247, 0.8);
 }
 
+select {
+    width: 100%;
+    padding: 8px 10px;
+    background: rgba(255, 255, 255, 0.1);
+    color: #fff;
+    border: 1px solid var(--border-glass);
+    border-radius: 8px;
+    font-family: var(--font-main);
+    font-size: 14px;
+    cursor: pointer;
+}
+
+select option {
+    background: #1a1a2a;
+    color: #fff;
+}
+
 /* Buttons */
 button {
     width: 100%;
