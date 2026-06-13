@@ -2,6 +2,7 @@ import * as THREE from 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/thr
 import { CONFIG } from './Config.js';
 import { GameManager } from './GameManager.js';
 import { createExhaust } from './ParticleSystem.js';
+import { buildRoutes, routeDist, exitTarget, exitCount } from './Navigation.js';
 
 let scene; // Module-level scope
 
@@ -801,8 +802,18 @@ function makeVehicle(type) {
         stopped: false,
         stuckTime: 0,
         spawnIndex: 0,
-        waitingToEnter: false
+        waitingToEnter: false,
+        destExit: Math.floor(Math.random() * exitCount()) // Routing goal
     };
+}
+
+// Pick a new destination exit, preferring one different from `avoid`
+function assignDestination(vehicle, avoid = -1) {
+    const n = exitCount();
+    if (n <= 1) { vehicle.destExit = 0; return; }
+    let d = Math.floor(Math.random() * n);
+    if (d === avoid) d = (d + 1 + Math.floor(Math.random() * (n - 1))) % n;
+    vehicle.destExit = d;
 }
 
 function pickVehicleType() {
@@ -884,6 +895,12 @@ export function spawnVehicles(count) {
         carBodyMesh.setColorAt(i, color);
     });
     if (carBodyMesh.instanceColor) carBodyMesh.instanceColor.needsUpdate = true;
+
+    // Seed the routing fields so cars navigate from the first frame
+    computeIntersectionQueues();
+    buildRoutes(n => (intersections[n] ? intersections[n].queueCount : 0));
+    routeTimer = 0;
+
     syncVehicleInstances();
 }
 
@@ -1116,20 +1133,114 @@ function turnExitBlocked(vehicle, intersection, turnDir) {
 // cars turn away from dead ends; blocked exit lanes are never turned into.
 // Lane discipline: right turns from the curb lane, left turns from the
 // inner lane — broken only when a dead end forces it.
+// Grid neighbor reached by leaving an intersection on `heading`
+function neighborByHeading(i, j, heading) {
+    return { i: i + Math.round(Math.sin(heading)), j: j + Math.round(Math.cos(heading)) };
+}
+
+// Soft preference weights (in routing-cost units; edge costs are ~1+).
+// A car will break lane discipline if doing so saves more than this.
+const LANE_PENALTY = 0.6;
+const STRAIGHT_BIAS = 0.25;
+
+// Choose where to go at an intersection to reach vehicle.destExit fastest.
+// Returns 0 = straight, 1 = left, -1 = right, or null = wait (no legal
+// move). Honors barricades, turn-landing room, and lane discipline (the
+// last as a soft preference). Cars only leave the map at their own exit.
 function getTurnChoice(vehicle, intersection) {
-    const straightOk = isMoveAllowed(intersection, vehicle.heading);
-    const turns = [1, -1].filter(dir =>
-        isMoveAllowed(intersection, normalizeAngle(vehicle.heading + dir * Math.PI / 2)) &&
-        !turnExitBlocked(vehicle, intersection, dir));
+    const dest = vehicle.destExit;
+    const target = exitTarget(dest);
+    let bestDir = undefined;
+    let bestVal = Infinity;
+    let straightOk = false;
 
-    const laneAppropriate = turns.filter(dir =>
-        (dir === -1 && vehicle.laneIndex === 1) || (dir === 1 && vehicle.laneIndex === 0));
-    const candidates = (laneAppropriate.length === 0 && !straightOk) ? turns : laneAppropriate;
+    for (const dir of [0, 1, -1]) {
+        const newHeading = dir === 0 ? vehicle.heading : normalizeAngle(vehicle.heading + dir * Math.PI / 2);
+        if (!isMoveAllowed(intersection, newHeading)) continue;
+        if (dir !== 0 && turnExitBlocked(vehicle, intersection, dir)) continue;
+        if (dir === 0) straightOk = true;
 
-    if (straightOk && (candidates.length === 0 || Math.random() > 0.3)) return 0;
-    if (candidates.length > 0) return candidates[Math.floor(Math.random() * candidates.length)];
-    if (straightOk) return 0;
-    return null;
+        const nb = neighborByHeading(intersection.gridI, intersection.gridJ, newHeading);
+        const offMap = nb.i < 0 || nb.i > CONFIG.GRID_SIZE || nb.j < 0 || nb.j > CONFIG.GRID_SIZE;
+
+        if (offMap) {
+            // Leaving the map is only desirable at the car's own exit
+            if (intersection.gridI === target.i && intersection.gridJ === target.j &&
+                Math.abs(normalizeAngle(newHeading - target.outHeading)) < 0.1) {
+                return dir; // Arrived: head out
+            }
+            continue;
+        }
+
+        let val = routeDist(dest, nb.i, nb.j) + Math.random() * 0.2; // Noise desyncs herds
+        if (dir === 0) val -= STRAIGHT_BIAS;
+        if (dir === -1 && vehicle.laneIndex !== 1) val += LANE_PENALTY; // Right from curb lane
+        if (dir === 1 && vehicle.laneIndex !== 0) val += LANE_PENALTY;  // Left from inner lane
+
+        if (val < bestVal) { bestVal = val; bestDir = dir; }
+    }
+
+    if (bestDir !== undefined) return bestDir;
+    return straightOk ? 0 : null;
+}
+
+// Intended direction toward the destination, ignoring lane/landing
+// constraints — used to pre-position into the correct turn lane on approach.
+function geometricBestDir(vehicle, intersection) {
+    const dest = vehicle.destExit;
+    const target = exitTarget(dest);
+    let bestDir = 0;
+    let bestVal = Infinity;
+    for (const dir of [0, 1, -1]) {
+        const newHeading = dir === 0 ? vehicle.heading : normalizeAngle(vehicle.heading + dir * Math.PI / 2);
+        if (!isMoveAllowed(intersection, newHeading)) continue;
+        const nb = neighborByHeading(intersection.gridI, intersection.gridJ, newHeading);
+        const offMap = nb.i < 0 || nb.i > CONFIG.GRID_SIZE || nb.j < 0 || nb.j > CONFIG.GRID_SIZE;
+        let val;
+        if (offMap) {
+            if (intersection.gridI === target.i && intersection.gridJ === target.j &&
+                Math.abs(normalizeAngle(newHeading - target.outHeading)) < 0.1) return dir;
+            continue;
+        }
+        val = routeDist(dest, nb.i, nb.j) - (dir === 0 ? STRAIGHT_BIAS : 0);
+        if (val < bestVal) { bestVal = val; bestDir = dir; }
+    }
+    return bestDir;
+}
+
+// Shift to a specific lane index if the target lane is clear
+function moveToLane(vehicle, targetIndex) {
+    if (vehicle.laneIndex === targetIndex) return false;
+    const spacing = CONFIG.BLOCK_SIZE + CONFIG.STREET_WIDTH;
+    const halfGrid = (CONFIG.GRID_SIZE * spacing) / 2;
+    const streetPos = -halfGrid + Math.round((vehicle.laneCoord + halfGrid) / spacing) * spacing;
+    const side = Math.sign(vehicle.laneCoord - streetPos) || 1;
+    const target = streetPos + side * LANE_OFFSETS[targetIndex];
+
+    const fx = Math.sin(vehicle.heading);
+    const fz = Math.cos(vehicle.heading);
+    const tx = vehicle.direction === 'horizontal' ? vehicle.position.x : target;
+    const tz = vehicle.direction === 'horizontal' ? target : vehicle.position.z;
+    if (!isLaneClear(tx, tz, fx, fz, 8, 6)) return false;
+
+    vehicle.laneCoord = target;
+    vehicle.laneIndex = targetIndex;
+    return true;
+}
+
+// On the approach to the next intersection, get into the lane the planned
+// turn needs: inner lane for a left, curb lane for a right.
+function planTurnLane(vehicle) {
+    const inter = intersectionNear(vehicle.position.x, vehicle.position.z);
+    if (!inter) return;
+    const along = vehicle.direction === 'horizontal'
+        ? Math.abs(inter.x - vehicle.position.x)
+        : Math.abs(inter.z - vehicle.position.z);
+    if (along > 22 || along < CONFIG.STREET_WIDTH / 2 + 2) return;
+
+    const dir = geometricBestDir(vehicle, inter);
+    if (dir === 1) moveToLane(vehicle, 0);
+    else if (dir === -1) moveToLane(vehicle, 1);
 }
 
 // Overtake: hop to the adjacent same-direction lane when impeded, if it
@@ -1179,14 +1290,18 @@ function entrancePose(side, index, laneOff) {
 // then re-enters there. Queuing instead of force-placing prevents pile-ups
 // at the ramps when the map is crowded.
 function tryEnterMap(vehicle) {
-    const exits = [...CONFIG.EXITS].sort(() => Math.random() - 0.5);
+    const order = CONFIG.EXITS.map((e, i) => i).sort(() => Math.random() - 0.5);
     const lanes = Math.random() < 0.5 ? [0, 1] : [1, 0];
-    for (const exit of exits) {
+    for (const exitIdx of order) {
+        const exit = CONFIG.EXITS[exitIdx];
         for (const laneIndex of lanes) {
             const pose = entrancePose(exit.side, exit.index, LANE_OFFSETS[laneIndex]);
             const fx = Math.sin(pose.heading);
             const fz = Math.cos(pose.heading);
             if (!isLaneClear(pose.x, pose.z, fx, fz, 8, 2)) continue;
+
+            // New trip: pick a destination other than this entrance
+            assignDestination(vehicle, exitIdx);
 
             vehicle.position.set(pose.x, 0, pose.z);
             vehicle.rotationY = pose.heading;
@@ -1242,12 +1357,24 @@ function startTurn(vehicle, intersection, turnDir) {
     };
 }
 
+// Recompute routing fields a few times a second so cars react to jams
+const ROUTE_REFRESH_INTERVAL = 1.5;
+let routeTimer = 0;
+
 export function updateVehicles(delta) {
     const halfGrid = (CONFIG.GRID_SIZE * (CONFIG.BLOCK_SIZE + CONFIG.STREET_WIDTH)) / 2;
     const boundary = halfGrid + CONFIG.STREET_WIDTH / 2 + 2; // Just past the street end
     const exhaustChance = 0.2 * Math.min(1, 60 / (vehicles.length || 1)); // Global budget
 
     buildSpatialGrid();
+
+    // Refresh congestion-aware routes on a timer
+    routeTimer += delta;
+    if (routeTimer >= ROUTE_REFRESH_INTERVAL) {
+        routeTimer = 0;
+        computeIntersectionQueues();
+        buildRoutes(n => (intersections[n] ? intersections[n].queueCount : 0));
+    }
 
     vehicles.forEach(vehicle => {
         // Queued cars wait off-map for room at an on-ramp
@@ -1341,11 +1468,14 @@ export function updateVehicles(delta) {
         }
         vehicle.inIntersection = inside;
 
-        // Overtake into the other lane when impeded mid-block
-        if (!vehicle.turning && !inside && vehicle.speed > 0.02 &&
-            distAhead < 14 && vehicle.targetSpeed < vehicle.maxSpeed * 0.7 &&
-            Math.random() < delta * 2) {
-            tryLaneChange(vehicle);
+        // Lane management mid-block: get into the planned turn lane on the
+        // approach; otherwise overtake into the other lane when impeded
+        if (!vehicle.turning && !inside) {
+            planTurnLane(vehicle);
+            if (vehicle.speed > 0.02 && distAhead < 14 &&
+                vehicle.targetSpeed < vehicle.maxSpeed * 0.7 && Math.random() < delta * 2) {
+                tryLaneChange(vehicle);
+            }
         }
 
         // Track how long we've been stuck (drives the gridlock relief
