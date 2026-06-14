@@ -110,7 +110,7 @@ function offsetPolyline(points, dir, offset) {
         const dx = ordered[i + 1].x - ordered[i].x;
         const dz = ordered[i + 1].z - ordered[i].z;
         const len = Math.hypot(dx, dz) || 1;
-        rights.push({ x: dz / len, z: -dx / len }); // right of travel
+        rights.push({ x: -dz / len, z: dx / len }); // right of travel (right-hand)
     }
     return ordered.map((p, i) => {
         const r1 = rights[Math.min(i, rights.length - 1)];

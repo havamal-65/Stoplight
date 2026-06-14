@@ -105,7 +105,7 @@ function ribbonGeometry(points, halfWidth, y, lateralOffset = 0) {
     for (let i = 0; i < points.length; i++) {
         const a = points[Math.max(0, i - 1)], b = points[Math.min(points.length - 1, i + 1)];
         const dx = b.x - a.x, dz = b.z - a.z, len = Math.hypot(dx, dz) || 1;
-        const nx = dz / len, nz = -dx / len; // right normal
+        const nx = -dz / len, nz = dx / len; // right normal
         const cx = points[i].x + nx * lateralOffset, cz = points[i].z + nz * lateralOffset;
         verts.push(cx - nx * halfWidth, y, cz - nz * halfWidth);
         verts.push(cx + nx * halfWidth, y, cz + nz * halfWidth);
@@ -176,7 +176,7 @@ function addLaneDashes(points, lateralOffset) {
         const ax = points[i].x, az = points[i].z, bx = points[i + 1].x, bz = points[i + 1].z;
         const dx = bx - ax, dz = bz - az, segLen = Math.hypot(dx, dz) || 1;
         const ux = dx / segLen, uz = dz / segLen;        // along
-        const nx = dz / segLen, nz = -dx / segLen;       // right normal
+        const nx = -dz / segLen, nz = dx / segLen;       // right normal (right-hand)
         const yaw = Math.atan2(ux, uz);
         // Stay clear of the junctions at each end
         for (let d = 6; d < segLen - 6; d += dashLen + gap) {
@@ -193,7 +193,7 @@ function addCrosswalks(node, halfW) {
         // Direction from the node out along this segment
         const other = seg.a === node ? seg.points[1] : seg.points[seg.points.length - 2];
         const dx = other.x - node.pos.x, dz = other.z - node.pos.z, len = Math.hypot(dx, dz) || 1;
-        const ux = dx / len, uz = dz / len, nx = dz / len, nz = -dx / len;
+        const ux = dx / len, uz = dz / len, nx = -dz / len, nz = dx / len;
         const yaw = Math.atan2(ux, uz);
         const w = (seg.lanesAB + seg.lanesBA) * LANE_WIDTH / 2;
         const base = halfW + 1.5; // just outside the junction pad
