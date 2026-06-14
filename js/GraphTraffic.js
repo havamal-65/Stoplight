@@ -16,8 +16,12 @@ import { LANE_WIDTH, lanePointAt, buildNetworkRoutes } from './RoadNetwork.js';
 const MAX_VEHICLES = 1200;
 const CELL_SIZE = 12;
 const AHEAD_RADIUS = 24;
-const MIN_GAP = 4.5;
 const ROUTE_REFRESH_INTERVAL = 1.5;
+
+// Intelligent Driver Model + reaction-time constants (engine units; "speed" is
+// distance per engine-time-step h = delta*60, so positions advance speed*h).
+const CAR_LENGTH = 4.2;          // bumper-to-bumper conversion (centre-distance − this = gap)
+const EMERGENCY_DECEL = 0.03;    // hard safety brake when the gap collapses
 
 let scene = null;
 let network = null;
@@ -29,10 +33,13 @@ let routeTimer = 0;
 let carBodyMesh = null, carDetailMesh = null;
 const dummy = new THREE.Object3D();
 
+// Per-type driver parameters. headway/jam/comfortDecel/react drive the IDM
+// car-following; aggressive = short headway + quick reaction, cautious = long
+// headway + slow reaction. (Engine units; tuned for believable visuals.)
 const VEHICLE_TYPES = {
-    NORMAL: { max: 1.0, accel: 1.0, safe: 1.0, colors: [0x4ecdc4, 0x45b7d1, 0xff9f43, 0x54a0ff, 0x5f27cd] },
-    AGGRESSIVE: { max: 1.15, accel: 1.4, safe: 0.7, colors: [0xff0000, 0xff4400, 0x333333] },
-    CAUTIOUS: { max: 0.85, accel: 0.8, safe: 1.4, colors: [0xeeeeee, 0xcccccc, 0xaaddff] }
+    NORMAL: { max: 1.0, accel: 1.0, headway: 12, jam: 1.6, comfortDecel: 0.010, react: 0.45, colors: [0x4ecdc4, 0x45b7d1, 0xff9f43, 0x54a0ff, 0x5f27cd] },
+    AGGRESSIVE: { max: 1.15, accel: 1.4, headway: 8, jam: 1.2, comfortDecel: 0.013, react: 0.30, colors: [0xff0000, 0xff4400, 0x333333] },
+    CAUTIOUS: { max: 0.85, accel: 0.8, headway: 18, jam: 2.2, comfortDecel: 0.008, react: 0.65, colors: [0xeeeeee, 0xcccccc, 0xaaddff] }
 };
 
 function mergedGeometry(parts) {
@@ -351,10 +358,10 @@ function laneClear(x, z, fx, fz, ahead, behind, lat = 2.4, exclude = null) {
     return true;
 }
 
-const aheadResult = { dist: Infinity, stopped: false };
+const aheadResult = { dist: Infinity, stopped: false, speed: 0 };
 function checkAhead(v, desperate) {
     const px = v.position.x, pz = v.position.z, fx = v.dirX, fz = v.dirZ;
-    let closest = Infinity, closeStopped = false;
+    let closest = Infinity, closeStopped = false, closeSpeed = 0;
     const r = AHEAD_RADIUS, rSq = r * r;
     const minCX = Math.floor((px - r) / CELL_SIZE), maxCX = Math.floor((px + r) / CELL_SIZE);
     const minCZ = Math.floor((pz - r) / CELL_SIZE), maxCZ = Math.floor((pz + r) / CELL_SIZE);
@@ -370,11 +377,16 @@ function checkAhead(v, desperate) {
             if (desperate && (fx * o.dirX + fz * o.dirZ) < 0.7) continue;
             const lat = Math.abs(-fz * dx + fx * dz);
             const limit = o.turning ? LANE_WIDTH * 1.4 : LANE_WIDTH * 0.7;
-            if (lat < limit) { closest = dSq; closeStopped = o.stopped; }
+            if (lat < limit) {
+                closest = dSq; closeStopped = o.stopped;
+                // Only the along-track component closes the gap (for Δv)
+                closeSpeed = o.speed * (fx * o.dirX + fz * o.dirZ);
+            }
         }
     }
     aheadResult.dist = closest === Infinity ? Infinity : Math.sqrt(closest);
     aheadResult.stopped = closeStopped;
+    aheadResult.speed = closest === Infinity ? 0 : Math.max(0, closeSpeed);
     return aheadResult;
 }
 
@@ -411,9 +423,13 @@ function makeVehicle(type) {
         position: new THREE.Vector3(), rotationY: 0, dirX: 0, dirZ: 1,
         speed: 0,
         maxSpeed: CONFIG.VEHICLE.MAX_SPEED * 2 * type.max, // road limit usually governs
-        acceleration: CONFIG.VEHICLE.ACCELERATION * type.accel,
-        safeDistance: CONFIG.VEHICLE.SAFE_DISTANCE * type.safe,
-        targetSpeed: 0,
+        accelMax: CONFIG.VEHICLE.ACCELERATION * type.accel, // IDM max acceleration
+        comfortDecel: type.comfortDecel,                    // IDM comfortable braking
+        timeHeadway: type.headway,                          // IDM desired time gap
+        jamGap: type.jam,                                   // IDM standstill bumper gap
+        reactionTime: type.react,                           // sim-seconds between decisions
+        reactTimer: Math.random() * type.react,             // staggered so cars don't sync
+        accelCmd: 0,                                         // last decided acceleration
         lane: null, laneDist: 0,
         turning: false, turn: null,
         destSink: null,
@@ -543,6 +559,41 @@ function startTurn(v, nextLane) {
     v.turn = { p0, p1, ctrl, exitHeading: h1, nextLane, length: p0.distanceTo(ctrl) + ctrl.distanceTo(p1), t: 0 };
 }
 
+// Intelligent Driver Model acceleration toward free speed v0, made more
+// restrictive by each obstacle in `leaders` ({ gap, speed }). Returns accel
+// in engine units (speed change per engine-time-step h).
+function idmAccel(v, v0, leaders) {
+    const a = v.accelMax;
+    const r = v.speed / v0;
+    const speedTerm = r * r * r * r; // (v/v0)^4
+    let accel = a * (1 - speedTerm); // free road
+    const denom = 2 * Math.sqrt(a * v.comfortDecel);
+    for (const L of leaders) {
+        const s = Math.max(0.3, L.gap);
+        const dv = v.speed - L.speed; // closing rate
+        const sStar = v.jamGap + Math.max(0, v.speed * v.timeHeadway + (v.speed * dv) / denom);
+        const interaction = a * (1 - speedTerm - (sStar / s) * (sStar / s));
+        if (interaction < accel) accel = interaction;
+    }
+    return accel;
+}
+
+// Does the car need to stop at the junction line ahead (red/yellow, or a
+// blocked landing that would wedge it)? Used to add a virtual stop-line leader.
+function needStopAtLine(v, distToEnd, desperate) {
+    if (v.turning || !v.lane || desperate) return false;
+    const st = laneSignalState(v.lane);
+    if (st === 'red' || (st === 'yellow' && distToEnd > 3)) return true;
+    if (distToEnd < 15) {
+        const node = v.lane.toNode;
+        if (node !== v.destSink) {
+            const next = chooseNextLane(v);
+            if (next && !landingClear(next, v)) return true;
+        }
+    }
+    return false;
+}
+
 // ---- main update ----
 export function updateVehicles(delta) {
     if (!network) return;
@@ -556,33 +607,45 @@ export function updateVehicles(delta) {
         v.dirX = Math.sin(v.rotationY); v.dirZ = Math.cos(v.rotationY);
         const desperate = v.stuckTime > 6; // stuck-relief valve
         const ahead = checkAhead(v, desperate);
-        let shouldStop = false;
+        const h = delta * 60; // engine time-step
 
-        // Signal check on approach to the junction at the end of the lane
-        if (!v.turning && v.lane) {
-            const distToEnd = v.lane.length - v.laneDist;
-            if (distToEnd < CONFIG.VEHICLE.STOP_DISTANCE && !desperate) {
-                const st = laneSignalState(v.lane);
-                if (st === 'red' || (st === 'yellow' && distToEnd > 3)) shouldStop = true;
-            }
-        }
-
-        // Car-following speed target
         const roadLimit = v.lane ? v.lane.speedLimit : v.maxSpeed;
-        const cruiseSpeed = Math.min(v.maxSpeed, roadLimit);
-        if (ahead.dist < MIN_GAP) shouldStop = true;
-        else v.targetSpeed = cruiseSpeed * Math.min(1, (ahead.dist - MIN_GAP) / Math.max(v.safeDistance, 0.1));
+        const v0 = Math.max(0.01, Math.min(v.maxSpeed, roadLimit));
 
         if (v.speed < 0.02) v.stuckTime += delta; else if (v.speed > 0.05) v.stuckTime = 0;
 
-        if (shouldStop) { v.speed = Math.max(0, v.speed - CONFIG.VEHICLE.DECELERATION * delta * 60); v.stopped = v.speed < 0.01; }
-        else {
-            if (v.speed < v.targetSpeed) v.speed = Math.min(v.targetSpeed, v.speed + v.acceleration * delta * 60);
-            else v.speed = Math.max(v.targetSpeed, v.speed - CONFIG.VEHICLE.DECELERATION * delta * 60);
-            v.stopped = v.speed < 0.01;
+        // Reaction time: re-decide the IDM acceleration only every τ seconds,
+        // holding it in between. This lags both starting and stopping, so cars
+        // launch in sequence at greens and brake with a human delay.
+        v.reactTimer -= delta;
+        if (v.reactTimer <= 0) {
+            v.reactTimer += v.reactionTime;
+            const leaders = [];
+            if (ahead.dist < Infinity) leaders.push({ gap: ahead.dist - CAR_LENGTH, speed: ahead.speed });
+            const distToEnd = v.lane ? v.lane.length - v.laneDist : Infinity;
+            if (needStopAtLine(v, distToEnd, desperate)) leaders.push({ gap: distToEnd, speed: 0 });
+            v.accelCmd = idmAccel(v, v0, leaders);
         }
 
-        const step = v.speed * delta * 60;
+        // Integrate the decided acceleration
+        v.speed = Math.max(0, Math.min(v0, v.speed + v.accelCmd * h));
+
+        // Per-frame safety floor (independent of reaction lag): never let the
+        // bumper gap collapse — emergency-brake regardless of the held accel.
+        const gap = ahead.dist - CAR_LENGTH;
+        if (gap < v.jamGap) {
+            v.speed = Math.max(0, v.speed - EMERGENCY_DECEL * h);
+            if (gap < 0.5) v.speed = 0;
+        }
+        v.stopped = v.speed < 0.01;
+
+        let step = v.speed * delta * 60;
+        // Never advance into the car ahead, even mid-reaction: cap the move to
+        // the available bumper gap (straight travel only; turns are gated by
+        // landingClear and their own following check).
+        if (!v.turning && ahead.dist < Infinity) {
+            step = Math.min(step, Math.max(0, ahead.dist - CAR_LENGTH - 0.3));
+        }
 
         if (v.turning) {
             const tn = v.turn;
@@ -601,9 +664,11 @@ export function updateVehicles(delta) {
                 if (node === v.destSink) { arrive(v); continue; }
                 const next = chooseNextLane(v);
                 if (!next) { arrive(v); continue; } // dead end: treat as arrival
-                // Only enter the junction if there's room to land — otherwise
-                // hold at the line so we never wedge mid-turn (desperate cars push on)
-                if (!desperate && !landingClear(next, v)) {
+                // Don't enter on red, and not unless there's room to land (so we
+                // never wedge mid-turn). Desperate cars push on to break knots.
+                const sig = laneSignalState(v.lane);
+                const blocked = (sig === 'red' || sig === 'yellow') || !landingClear(next, v);
+                if (!desperate && blocked) {
                     v.laneDist = v.lane.length;
                     const p = lanePointAt(v.lane, v.laneDist);
                     v.position.set(p.x, 0, p.z); v.rotationY = p.heading;
