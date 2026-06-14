@@ -98,47 +98,144 @@ function buildGround() {
     builtMeshes.push(ground);
 }
 
+// A flat ribbon following a polyline, offset laterally and at height y. Used
+// for asphalt, centre lines, and edge lines. Returns a BufferGeometry.
+function ribbonGeometry(points, halfWidth, y, lateralOffset = 0) {
+    const verts = [], idx = [];
+    for (let i = 0; i < points.length; i++) {
+        const a = points[Math.max(0, i - 1)], b = points[Math.min(points.length - 1, i + 1)];
+        const dx = b.x - a.x, dz = b.z - a.z, len = Math.hypot(dx, dz) || 1;
+        const nx = dz / len, nz = -dx / len; // right normal
+        const cx = points[i].x + nx * lateralOffset, cz = points[i].z + nz * lateralOffset;
+        verts.push(cx - nx * halfWidth, y, cz - nz * halfWidth);
+        verts.push(cx + nx * halfWidth, y, cz + nz * halfWidth);
+    }
+    for (let i = 0; i < points.length - 1; i++) {
+        const o = i * 2;
+        idx.push(o, o + 1, o + 2, o + 1, o + 3, o + 2);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+    geo.setIndex(idx);
+    geo.computeVertexNormals();
+    return geo;
+}
+
+function addRibbon(points, halfWidth, color, y, lateralOffset, basic) {
+    const mat = basic
+        ? new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide })
+        : new THREE.MeshStandardMaterial({ color, side: THREE.DoubleSide });
+    const mesh = new THREE.Mesh(ribbonGeometry(points, halfWidth, y, lateralOffset), mat);
+    mesh.receiveShadow = !basic;
+    scene.add(mesh);
+    builtMeshes.push(mesh);
+    return mesh;
+}
+
+// Collected dash + crosswalk quads, drawn as one instanced mesh (with yaw)
+const markQuads = []; // { x, z, sx, sz, yaw, color }
+
 function buildRoadGeometry() {
     for (const seg of network.segments) {
         const halfW = (seg.lanesAB + seg.lanesBA) * LANE_WIDTH / 2;
-        const left = [], right = [];
         const pts = seg.points;
-        for (let i = 0; i < pts.length; i++) {
-            const a = pts[Math.max(0, i - 1)], b = pts[Math.min(pts.length - 1, i + 1)];
-            const dx = b.x - a.x, dz = b.z - a.z, len = Math.hypot(dx, dz) || 1;
-            const nx = dz / len, nz = -dx / len; // right normal
-            left.push([pts[i].x - nx * halfW, pts[i].z - nz * halfW]);
-            right.push([pts[i].x + nx * halfW, pts[i].z + nz * halfW]);
-        }
-        const verts = [], idx = [];
-        for (let i = 0; i < pts.length; i++) {
-            verts.push(left[i][0], 0.02, left[i][1]);
-            verts.push(right[i][0], 0.02, right[i][1]);
-        }
-        for (let i = 0; i < pts.length - 1; i++) {
-            const o = i * 2;
-            idx.push(o, o + 1, o + 2, o + 1, o + 3, o + 2);
-        }
-        const geo = new THREE.BufferGeometry();
-        geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
-        geo.setIndex(idx);
-        geo.computeVertexNormals();
-        const color = seg.klass === 'arterial' ? 0x3a3a3a : 0x333333;
-        const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color }));
-        mesh.receiveShadow = true;
-        scene.add(mesh);
-        builtMeshes.push(mesh);
+
+        // Asphalt
+        addRibbon(pts, halfW, seg.klass === 'arterial' ? 0x44464c : 0x3c3e44, 0.02, 0, false);
+        // Solid white edge lines
+        addRibbon(pts, 0.18, 0xf0f0f0, 0.04, halfW - 0.3, true);
+        addRibbon(pts, 0.18, 0xf0f0f0, 0.04, -(halfW - 0.3), true);
+        // Yellow centre line dividing the two travel directions
+        addRibbon(pts, 0.22, 0xffcc00, 0.04, 0, true);
+        // Dashed white dividers between same-direction lanes (2+ lanes/dir)
+        if (seg.lanesAB >= 2) addLaneDashes(pts, LANE_WIDTH);
+        if (seg.lanesBA >= 2) addLaneDashes(pts, -LANE_WIDTH);
     }
-    // Junction pads
+
+    // Junction pads sized to the widest road that meets them
     for (const node of network.nodes.values()) {
-        const r = Math.max(LANE_WIDTH * 1.5, 6);
-        const pad = new THREE.Mesh(new THREE.CircleGeometry(r, 20), new THREE.MeshStandardMaterial({ color: 0x2a2a2a }));
+        let maxHalf = LANE_WIDTH;
+        for (const s of node.segments) maxHalf = Math.max(maxHalf, (s.lanesAB + s.lanesBA) * LANE_WIDTH / 2);
+        const r = maxHalf + 2;
+        const pad = new THREE.Mesh(new THREE.CircleGeometry(r, 24), new THREE.MeshStandardMaterial({ color: 0x3a3c42 }));
         pad.rotation.x = -Math.PI / 2;
-        pad.position.set(node.pos.x, 0.025, node.pos.z);
+        pad.position.set(node.pos.x, 0.03, node.pos.z);
         pad.receiveShadow = true;
         scene.add(pad);
         builtMeshes.push(pad);
+        if (node.control === 'signal') addCrosswalks(node, maxHalf);
     }
+
+    buildMarkInstances();
+}
+
+// Dashed lane divider along a polyline, offset to one side of centre
+function addLaneDashes(points, lateralOffset) {
+    const dashLen = 3, gap = 3;
+    for (let i = 0; i < points.length - 1; i++) {
+        const ax = points[i].x, az = points[i].z, bx = points[i + 1].x, bz = points[i + 1].z;
+        const dx = bx - ax, dz = bz - az, segLen = Math.hypot(dx, dz) || 1;
+        const ux = dx / segLen, uz = dz / segLen;        // along
+        const nx = dz / segLen, nz = -dx / segLen;       // right normal
+        const yaw = Math.atan2(ux, uz);
+        // Stay clear of the junctions at each end
+        for (let d = 6; d < segLen - 6; d += dashLen + gap) {
+            const cx = ax + ux * (d + dashLen / 2) + nx * lateralOffset;
+            const cz = az + uz * (d + dashLen / 2) + nz * lateralOffset;
+            markQuads.push({ x: cx, z: cz, sx: 0.2, sz: dashLen, yaw, color: 0xf0f0f0 });
+        }
+    }
+}
+
+// Crosswalk stripes across each approach at a signalized node
+function addCrosswalks(node, halfW) {
+    for (const seg of node.segments) {
+        // Direction from the node out along this segment
+        const other = seg.a === node ? seg.points[1] : seg.points[seg.points.length - 2];
+        const dx = other.x - node.pos.x, dz = other.z - node.pos.z, len = Math.hypot(dx, dz) || 1;
+        const ux = dx / len, uz = dz / len, nx = dz / len, nz = -dx / len;
+        const yaw = Math.atan2(ux, uz);
+        const w = (seg.lanesAB + seg.lanesBA) * LANE_WIDTH / 2;
+        const base = halfW + 1.5; // just outside the junction pad
+        const stripes = Math.max(3, Math.round(w / 1.2));
+        for (let s = 0; s < stripes; s++) {
+            const off = (s / (stripes - 1) - 0.5) * (w * 1.6);
+            markQuads.push({
+                x: node.pos.x + ux * base + nx * off,
+                z: node.pos.z + uz * base + nz * off,
+                sx: 0.5, sz: 2.4, yaw, color: 0xffffff
+            });
+        }
+    }
+}
+
+function buildMarkInstances() {
+    if (markQuads.length === 0) return;
+    const mesh = new THREE.InstancedMesh(
+        new THREE.PlaneGeometry(1, 1),
+        new THREE.MeshBasicMaterial({ vertexColors: false, color: 0xffffff }),
+        markQuads.length
+    );
+    const d = new THREE.Object3D();
+    const col = new THREE.Color();
+    const flat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2);
+    const up = new THREE.Vector3(0, 1, 0);
+    const yawQ = new THREE.Quaternion();
+    markQuads.forEach((m, i) => {
+        d.position.set(m.x, 0.038, m.z);
+        // Lay flat (normal +Y), then yaw about world up so local X = across
+        // the road, local Y = along the road
+        yawQ.setFromAxisAngle(up, m.yaw);
+        d.quaternion.copy(yawQ).multiply(flat);
+        d.scale.set(m.sx, m.sz, 1);
+        d.updateMatrix();
+        mesh.setMatrixAt(i, d.matrix);
+        mesh.setColorAt(i, col.setHex(m.color));
+    });
+    mesh.frustumCulled = false;
+    scene.add(mesh);
+    builtMeshes.push(mesh);
+    markQuads.length = 0;
 }
 
 // ---- signals: cluster each signalized node's approaches into 2 phase groups ----
