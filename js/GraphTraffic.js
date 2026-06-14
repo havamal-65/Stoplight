@@ -428,7 +428,7 @@ function makeVehicle(type) {
         reactionTime: type.react,                           // sim-seconds between decisions
         reactTimer: Math.random() * type.react,             // staggered so cars don't sync
         accelCmd: 0,                                         // last decided acceleration
-        lane: null, laneDist: 0,
+        lane: null, laneDist: 0, lateral: 0, // lateral = offset while changing lanes
         turning: false, turn: null,
         destSink: null,
         stopped: false, stuckTime: 0, spawnIndex: 0, waitingToEnter: false
@@ -436,7 +436,7 @@ function makeVehicle(type) {
 }
 
 function placeOnLane(v, lane, dist) {
-    v.lane = lane; v.laneDist = dist;
+    v.lane = lane; v.laneDist = dist; v.lateral = 0;
     const p = lanePointAt(lane, dist);
     v.position.set(p.x, 0, p.z);
     v.rotationY = p.heading;
@@ -505,20 +505,81 @@ function refreshRoutes() {
     routes = buildNetworkRoutes(network, id => cong.get(id) || 0);
 }
 
-// Pick the outgoing lane at a junction that minimizes time-to-destination
+// Classify a movement (incoming lane → outgoing lane) by heading change.
+function movementType(inLane, outLane) {
+    const hIn = approachHeading(inLane);
+    const hOut = lanePointAt(outLane, Math.min(3, outLane.length)).heading;
+    let d = hOut - hIn;
+    while (d > Math.PI) d -= 2 * Math.PI;
+    while (d < -Math.PI) d += 2 * Math.PI;
+    if (Math.abs(d) < 0.5) return 'straight';
+    return d > 0 ? 'left' : 'right';
+}
+
+function routeCostOf(v, out, cost) {
+    const c = cost ? cost.get(out.toNode.id) : 0;
+    if (c == null || !Number.isFinite(c)) return Infinity;
+    return out.segment.length / Math.max(out.speedLimit, 0.01) + c;
+}
+
+// Lane discipline: left turns only from the innermost lane (index 0), right
+// turns only from the curb lane (highest index); straight from any. Single-lane
+// roads allow everything. Pick the cheapest route-appropriate movement; fall
+// back to the cheapest legal-but-disallowed one only if nothing else (avoids
+// freezing), which is rare.
+function laneAllows(v, out) {
+    const count = v.lane.segment.lanesByDir[v.lane.dir].length;
+    const mv = movementType(v.lane, out);
+    if (mv === 'straight') return true;
+    if (mv === 'left') return v.lane.index === 0;
+    return v.lane.index === count - 1; // right
+}
+
 function chooseNextLane(v) {
-    const node = v.lane.toNode;
     const cost = routes.get(v.destSink.id);
-    if (!cost) return v.lane.next[0] || null;
+    let best = null, bestVal = Infinity, fallback = null, fbVal = Infinity;
+    for (const out of v.lane.next) {
+        const val = routeCostOf(v, out, cost) + Math.random() * 0.5;
+        if (!Number.isFinite(val)) continue;
+        if (val < fbVal) { fbVal = val; fallback = out; }
+        if (laneAllows(v, out) && val < bestVal) { bestVal = val; best = out; }
+    }
+    return best || fallback || v.lane.next[0] || null;
+}
+
+// The lane index the car should be in for its intended route movement:
+// inner for a left, curb for a right, current for straight.
+function intendedLaneIndex(v) {
+    const cost = routes.get(v.destSink.id);
     let best = null, bestVal = Infinity;
     for (const out of v.lane.next) {
-        const c = cost.get(out.toNode.id);
-        if (c == null || !Number.isFinite(c)) continue;
-        const edge = out.segment.length / Math.max(out.speedLimit, 0.01);
-        const val = edge + c + Math.random() * 0.5;
+        const val = routeCostOf(v, out, cost);
         if (val < bestVal) { bestVal = val; best = out; }
     }
-    return best || v.lane.next[0] || null;
+    if (!best) return v.lane.index;
+    const mv = movementType(v.lane, best);
+    if (mv === 'left') return 0;
+    if (mv === 'right') return v.lane.segment.lanesByDir[v.lane.dir].length - 1;
+    return v.lane.index;
+}
+
+// Move to the adjacent same-direction lane (one step toward newIndex) if the
+// target spot is clear, carrying current position as a lateral offset that
+// then eases to the new lane centre (smooth, no sideways teleport).
+function changeLaneToward(v, newIndex) {
+    const lanesArr = v.lane.segment.lanesByDir[v.lane.dir];
+    const step = Math.sign(newIndex - v.lane.index);
+    if (step === 0) return;
+    const ni = v.lane.index + step;
+    if (ni < 0 || ni >= lanesArr.length) return;
+    const target = lanesArr[ni];
+    const td = Math.min(v.laneDist, target.length - 0.1);
+    const p = lanePointAt(target, td);
+    const fx = Math.sin(p.heading), fz = Math.cos(p.heading);
+    if (!laneClear(p.x, p.z, fx, fz, 8, 6, 2.4, v)) return;
+    const nx = -Math.cos(p.heading), nz = Math.sin(p.heading); // right normal
+    v.lateral = (v.position.x - p.x) * nx + (v.position.z - p.z) * nz;
+    v.lane = target; v.laneDist = td;
 }
 
 function tryEnterMap(v) {
@@ -589,6 +650,27 @@ function needStopAtLine(v, distToEnd, desperate) {
         if (node !== v.destSink) {
             const next = chooseNextLane(v);
             if (next && !landingClear(next, v)) return true;
+        }
+    }
+    return false;
+}
+
+// Unprotected left turn: yield to oncoming MOVING through-traffic (opposite
+// heading) in or approaching the box. Other turners are excluded — opposing
+// lefts pass each other without crossing, and excluding them avoids deadlock;
+// stopped cars are excluded so we don't wait forever.
+function leftTurnYield(v, node) {
+    const fx = Math.sin(v.rotationY), fz = Math.cos(v.rotationY);
+    const range = node.radius + 18, rSq = range * range;
+    const minCX = Math.floor((node.pos.x - range) / CELL_SIZE), maxCX = Math.floor((node.pos.x + range) / CELL_SIZE);
+    const minCZ = Math.floor((node.pos.z - range) / CELL_SIZE), maxCZ = Math.floor((node.pos.z + range) / CELL_SIZE);
+    for (let cx = minCX; cx <= maxCX; cx++) for (let cz = minCZ; cz <= maxCZ; cz++) {
+        const cell = grid.get((cx + 512) * 1024 + (cz + 512)); if (!cell) continue;
+        for (const o of cell) {
+            if (o === v || o.waitingToEnter || o.turning || o.speed < 0.05) continue;
+            if (fx * o.dirX + fz * o.dirZ > -0.5) continue; // must be oncoming (opposite)
+            const dx = o.position.x - node.pos.x, dz = o.position.z - node.pos.z;
+            if (dx * dx + dz * dz < rSq) return true;
         }
     }
     return false;
@@ -669,6 +751,11 @@ export function updateVehicles(delta) {
             if (tn.t >= 1) { v.turning = false; placeOnLane(v, tn.nextLane, tn.entry); v.turn = null; }
         } else if (v.lane) {
             const stopAt = v.lane.length - setback; // box-edge stop line
+            // Get into the correct turn lane on approach (smooth, once settled)
+            if (v.lateral === 0 && distToStop > 10 && distToStop < 45) {
+                const want = intendedLaneIndex(v);
+                if (want !== v.lane.index) changeLaneToward(v, want);
+            }
             if (v.laneDist + step >= stopAt) {
                 const node = v.lane.toNode;
                 if (node === v.destSink) { arrive(v); continue; }
@@ -677,7 +764,9 @@ export function updateVehicles(delta) {
                 // Don't enter on red, and not unless there's room to land (so we
                 // never wedge mid-turn). Desperate cars push on to break knots.
                 const sig = laneSignalState(v.lane);
-                const blocked = (sig === 'red' || sig === 'yellow') || !landingClear(next, v);
+                let blocked = (sig === 'red' || sig === 'yellow') || !landingClear(next, v);
+                // Unprotected left turns yield to oncoming through-traffic
+                if (!blocked && movementType(v.lane, next) === 'left' && leftTurnYield(v, node)) blocked = true;
                 if (!desperate && blocked) {
                     v.laneDist = stopAt; // hold at the box edge, not the centre
                     const p = lanePointAt(v.lane, v.laneDist);
@@ -689,7 +778,13 @@ export function updateVehicles(delta) {
             } else {
                 v.laneDist += step;
                 const p = lanePointAt(v.lane, v.laneDist);
-                v.position.set(p.x, 0, p.z);
+                // Ease any lane-change lateral offset back to the lane centre
+                if (v.lateral !== 0) {
+                    const rate = Math.max(0.08, step * 0.5);
+                    v.lateral = Math.abs(v.lateral) <= rate ? 0 : v.lateral - Math.sign(v.lateral) * rate;
+                }
+                const nx = -Math.cos(p.heading), nz = Math.sin(p.heading); // right normal
+                v.position.set(p.x + nx * v.lateral, 0, p.z + nz * v.lateral);
                 v.rotationY = p.heading;
             }
         }
