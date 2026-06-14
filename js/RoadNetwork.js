@@ -78,6 +78,16 @@ export function createRoadNetwork(spec) {
         lane.toNode.incoming.push(lane);
     }
 
+    // Junction half-extent: how far the box reaches from the node centre.
+    // Used to set stop lines back so cars wait at the edge, not the middle.
+    for (const node of nodes.values()) {
+        let half = LANE_WIDTH;
+        for (const s of node.segments) {
+            half = Math.max(half, (s.lanesAB + s.lanesBA) * LANE_WIDTH / 2);
+        }
+        node.radius = half + 1.5;
+    }
+
     // Turn movements: an incoming lane may continue onto any outgoing lane
     // that leaves the node on a different segment (no immediate U-turn).
     for (const lane of lanes) {

@@ -159,18 +159,16 @@ function buildRoadGeometry() {
         if (seg.lanesBA >= 2) addLaneDashes(pts, -LANE_WIDTH);
     }
 
-    // Junction pads sized to the widest road that meets them
+    // Junction pads cover the box up to the stop lines (node.radius)
     for (const node of network.nodes.values()) {
-        let maxHalf = LANE_WIDTH;
-        for (const s of node.segments) maxHalf = Math.max(maxHalf, (s.lanesAB + s.lanesBA) * LANE_WIDTH / 2);
-        const r = maxHalf + 2;
+        const r = node.radius + 1;
         const pad = new THREE.Mesh(new THREE.CircleGeometry(r, 24), new THREE.MeshStandardMaterial({ color: 0x3a3c42 }));
         pad.rotation.x = -Math.PI / 2;
         pad.position.set(node.pos.x, 0.03, node.pos.z);
         pad.receiveShadow = true;
         scene.add(pad);
         builtMeshes.push(pad);
-        if (node.control === 'signal') addCrosswalks(node, maxHalf);
+        if (node.control === 'signal') addCrosswalks(node, node.radius);
     }
 
     buildMarkInstances();
@@ -259,9 +257,9 @@ function initSignals() {
         }
         const cycle = { nsGreen: 6, ewGreen: 6, yellow: 2, allRed: 1 };
         const sig = { node, t: Math.random() * 20, group0State: 'green', group1State: 'red', timings: cycle, indicators: [] };
-        // simple visual: a colored marker per approach
+        // simple visual: a colored marker per approach, at the stop line
         for (const lane of node.incoming) {
-            const end = lanePointAt(lane, lane.length);
+            const end = lanePointAt(lane, lane.length - Math.min(lane.toNode.radius, lane.length * 0.4));
             const marker = new THREE.Mesh(new THREE.SphereGeometry(0.6, 8, 8), new THREE.MeshBasicMaterial({ color: 0xff0000 }));
             marker.position.set(end.x, 3, end.z);
             scene.add(marker);
@@ -394,7 +392,7 @@ function checkAhead(v, desperate) {
 // STOPPED car sits in the landing zone — entering then would wedge us in the
 // box. Moving traffic ahead is fine; car-following handles the catch-up.
 function landingClear(lane, self) {
-    const p = lanePointAt(lane, 0);
+    const p = lanePointAt(lane, entryDist(lane)); // the far box edge we'd land on
     const fx = Math.sin(p.heading), fz = Math.cos(p.heading);
     const ahead = 11, lat = 2.4, r = ahead + lat;
     const minCX = Math.floor((p.x - r) / CELL_SIZE), maxCX = Math.floor((p.x + r) / CELL_SIZE);
@@ -545,7 +543,9 @@ function tryEnterMap(v) {
 
 function startTurn(v, nextLane) {
     const p0 = v.position.clone(); p0.y = 0;
-    const start = lanePointAt(nextLane, 0);
+    // Cross the whole intersection: land on the far box edge of the next lane
+    const entry = entryDist(nextLane);
+    const start = lanePointAt(nextLane, entry);
     const p1 = new THREE.Vector3(start.x, 0, start.z);
     // tangent control point: where the two headings' lines roughly cross
     const h0 = v.rotationY, h1 = start.heading;
@@ -556,7 +556,7 @@ function startTurn(v, nextLane) {
         p0.z + Math.cos(h0) * d * 0.5
     );
     v.turning = true;
-    v.turn = { p0, p1, ctrl, exitHeading: h1, nextLane, length: p0.distanceTo(ctrl) + ctrl.distanceTo(p1), t: 0 };
+    v.turn = { p0, p1, ctrl, exitHeading: h1, nextLane, entry, length: p0.distanceTo(ctrl) + ctrl.distanceTo(p1), t: 0 };
 }
 
 // Intelligent Driver Model acceleration toward free speed v0, made more
@@ -594,6 +594,11 @@ function needStopAtLine(v, distToEnd, desperate) {
     return false;
 }
 
+// Stop-line setback from the node centre (so cars wait at the box edge), and
+// the matching entry distance on the lane being entered (the far box edge).
+function stopSetback(lane) { return Math.min(lane.toNode.radius, lane.length * 0.4); }
+function entryDist(lane) { return Math.min(lane.fromNode.radius, lane.length * 0.4); }
+
 // ---- main update ----
 export function updateVehicles(delta) {
     if (!network) return;
@@ -614,6 +619,11 @@ export function updateVehicles(delta) {
 
         if (v.speed < 0.02) v.stuckTime += delta; else if (v.speed > 0.05) v.stuckTime = 0;
 
+        // Stop line sits back from the node centre by the junction radius, so a
+        // waiting car holds at the box edge and the centre stays clear.
+        const setback = (!v.turning && v.lane) ? stopSetback(v.lane) : 0;
+        const distToStop = v.lane ? (v.lane.length - setback) - v.laneDist : Infinity;
+
         // Reaction time: re-decide the IDM acceleration only every τ seconds,
         // holding it in between. This lags both starting and stopping, so cars
         // launch in sequence at greens and brake with a human delay.
@@ -622,8 +632,7 @@ export function updateVehicles(delta) {
             v.reactTimer += v.reactionTime;
             const leaders = [];
             if (ahead.dist < Infinity) leaders.push({ gap: ahead.dist - CAR_LENGTH, speed: ahead.speed });
-            const distToEnd = v.lane ? v.lane.length - v.laneDist : Infinity;
-            if (needStopAtLine(v, distToEnd, desperate)) leaders.push({ gap: distToEnd, speed: 0 });
+            if (needStopAtLine(v, distToStop, desperate)) leaders.push({ gap: Math.max(0.3, distToStop), speed: 0 });
             v.accelCmd = idmAccel(v, v0, leaders);
         }
 
@@ -657,9 +666,10 @@ export function updateVehicles(delta) {
             const dx = mt * (tn.ctrl.x - tn.p0.x) + t * (tn.p1.x - tn.ctrl.x);
             const dz = mt * (tn.ctrl.z - tn.p0.z) + t * (tn.p1.z - tn.ctrl.z);
             v.rotationY = Math.atan2(dx, dz);
-            if (tn.t >= 1) { v.turning = false; placeOnLane(v, tn.nextLane, 0); v.turn = null; }
+            if (tn.t >= 1) { v.turning = false; placeOnLane(v, tn.nextLane, tn.entry); v.turn = null; }
         } else if (v.lane) {
-            if (v.laneDist + step >= v.lane.length) {
+            const stopAt = v.lane.length - setback; // box-edge stop line
+            if (v.laneDist + step >= stopAt) {
                 const node = v.lane.toNode;
                 if (node === v.destSink) { arrive(v); continue; }
                 const next = chooseNextLane(v);
@@ -669,7 +679,7 @@ export function updateVehicles(delta) {
                 const sig = laneSignalState(v.lane);
                 const blocked = (sig === 'red' || sig === 'yellow') || !landingClear(next, v);
                 if (!desperate && blocked) {
-                    v.laneDist = v.lane.length;
+                    v.laneDist = stopAt; // hold at the box edge, not the centre
                     const p = lanePointAt(v.lane, v.laneDist);
                     v.position.set(p.x, 0, p.z); v.rotationY = p.heading;
                     v.speed = 0; v.stopped = true;
