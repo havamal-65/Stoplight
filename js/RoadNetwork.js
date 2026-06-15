@@ -10,7 +10,7 @@ import * as THREE from 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/thr
 // produces now and what an OSM importer will produce later.
 // ============================================
 
-export const LANE_WIDTH = 3.3;
+export const LANE_WIDTH = 4.2;
 
 // Heading convention matches the grid engine: position advances by
 // (sin(h), cos(h)), so heading 0 = +z. "Right of" a travel direction d is
