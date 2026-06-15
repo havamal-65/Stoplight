@@ -10,7 +10,7 @@ import * as THREE from 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/thr
 // produces now and what an OSM importer will produce later.
 // ============================================
 
-export const LANE_WIDTH = 3;
+export const LANE_WIDTH = 3.3;
 
 // Heading convention matches the grid engine: position advances by
 // (sin(h), cos(h)), so heading 0 = +z. "Right of" a travel direction d is
@@ -85,7 +85,7 @@ export function createRoadNetwork(spec) {
         for (const s of node.segments) {
             half = Math.max(half, (s.lanesAB + s.lanesBA) * LANE_WIDTH / 2);
         }
-        node.radius = half + 1.5;
+        node.radius = half + 4;
     }
 
     // Turn movements: an incoming lane may continue onto any outgoing lane

@@ -608,14 +608,24 @@ function startTurn(v, nextLane) {
     const entry = entryDist(nextLane);
     const start = lanePointAt(nextLane, entry);
     const p1 = new THREE.Vector3(start.x, 0, start.z);
-    // tangent control point: where the two headings' lines roughly cross
     const h0 = v.rotationY, h1 = start.heading;
-    const d = p0.distanceTo(p1);
-    const ctrl = new THREE.Vector3(
-        p0.x + Math.sin(h0) * d * 0.5,
-        0,
-        p0.z + Math.cos(h0) * d * 0.5
-    );
+
+    // Control point = intersection of the entry tangent (through p0 along h0)
+    // and the exit tangent (through p1 along h1), so the bezier is tangent to
+    // both lanes → a smooth rounded turn. Fall back to the midpoint when the
+    // lines are near-parallel (straight) or the solution is degenerate.
+    const ex = Math.sin(h0), ez = Math.cos(h0);
+    const xx = Math.sin(h1), xz = Math.cos(h1);
+    const det = ex * (-xz) - (-xx) * ez; // p0 + a·e = p1 + c·x
+    let ctrl;
+    if (Math.abs(det) > 0.05) {
+        const a = ((p1.x - p0.x) * (-xz) - (-xx) * (p1.z - p0.z)) / det;
+        if (a > 0.5 && a < p0.distanceTo(p1) * 2) {
+            ctrl = new THREE.Vector3(p0.x + ex * a, 0, p0.z + ez * a);
+        }
+    }
+    if (!ctrl) ctrl = new THREE.Vector3((p0.x + p1.x) / 2, 0, (p0.z + p1.z) / 2);
+
     v.turning = true;
     v.turn = { p0, p1, ctrl, exitHeading: h1, nextLane, entry, length: p0.distanceTo(ctrl) + ctrl.distanceTo(p1), t: 0 };
 }
