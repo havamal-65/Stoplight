@@ -665,22 +665,26 @@ function needStopAtLine(v, distToEnd, desperate) {
     return false;
 }
 
-// Unprotected left turn: yield to oncoming MOVING through-traffic (opposite
-// heading) in or approaching the box. Other turners are excluded — opposing
-// lefts pass each other without crossing, and excluding them avoids deadlock;
-// stopped cars are excluded so we don't wait forever.
+// Unprotected left turn: yield to oncoming MOVING through-traffic. Uses a
+// time-to-arrival gap — yield if any oncoming car (opposite heading, moving,
+// and approaching the node) would reach the box before we can clear it
+// (~2 radii at cruise + buffer). Other turners are excluded (opposing lefts
+// pass without crossing, and excluding them avoids deadlock); stopped cars are
+// excluded so a long-stuck turner still gets out via the desperate override.
 function leftTurnYield(v, node) {
     const fx = Math.sin(v.rotationY), fz = Math.cos(v.rotationY);
-    const range = node.radius + 18, rSq = range * range;
-    const minCX = Math.floor((node.pos.x - range) / CELL_SIZE), maxCX = Math.floor((node.pos.x + range) / CELL_SIZE);
-    const minCZ = Math.floor((node.pos.z - range) / CELL_SIZE), maxCZ = Math.floor((node.pos.z + range) / CELL_SIZE);
+    const clearTime = (node.radius * 2 + 6) / Math.max(v.lane.speedLimit, 0.05) + 12;
+    const scan = node.radius + 45;
+    const minCX = Math.floor((node.pos.x - scan) / CELL_SIZE), maxCX = Math.floor((node.pos.x + scan) / CELL_SIZE);
+    const minCZ = Math.floor((node.pos.z - scan) / CELL_SIZE), maxCZ = Math.floor((node.pos.z + scan) / CELL_SIZE);
     for (let cx = minCX; cx <= maxCX; cx++) for (let cz = minCZ; cz <= maxCZ; cz++) {
         const cell = grid.get((cx + 512) * 1024 + (cz + 512)); if (!cell) continue;
         for (const o of cell) {
             if (o === v || o.waitingToEnter || o.turning || o.speed < 0.05) continue;
             if (fx * o.dirX + fz * o.dirZ > -0.5) continue; // must be oncoming (opposite)
             const dx = o.position.x - node.pos.x, dz = o.position.z - node.pos.z;
-            if (dx * dx + dz * dz < rSq) return true;
+            if (o.dirX * (-dx) + o.dirZ * (-dz) <= 0) continue; // must be approaching the node
+            if (Math.hypot(dx, dz) / o.speed < clearTime) return true; // arrives before we clear
         }
     }
     return false;
