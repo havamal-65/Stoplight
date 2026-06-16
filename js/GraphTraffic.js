@@ -761,8 +761,9 @@ export function updateVehicles(delta) {
             if (tn.t >= 1) { v.turning = false; placeOnLane(v, tn.nextLane, tn.entry); v.turn = null; }
         } else if (v.lane) {
             const stopAt = v.lane.length - setback; // box-edge stop line
-            // Get into the correct turn lane on approach (smooth, once settled)
-            if (v.lateral === 0 && distToStop > 10 && distToStop < 45) {
+            // Get into the correct turn lane as soon as we're on the segment
+            // (just clear of the box) — not only in the last stretch.
+            if (v.lateral === 0 && distToStop > 10) {
                 const want = intendedLaneIndex(v);
                 if (want !== v.lane.index) changeLaneToward(v, want);
             }
