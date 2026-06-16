@@ -527,22 +527,21 @@ function routeCostOf(v, out, cost) {
     return out.segment.length / Math.max(out.speedLimit, 0.01) + c;
 }
 
-// Lane discipline: left turns only from the innermost lane (index 0), right
-// turns only from the curb lane (highest index); straight from any. Single-lane
-// roads allow everything. Pick the cheapest route-appropriate movement; fall
-// back to the cheapest legal-but-disallowed one only if nothing else (avoids
-// freezing), which is rare.
+// Lane discipline: the left (inner) lane is left-turn-only; the curb lane is
+// straight-or-right. So left turns only from index 0, right turns only from the
+// curb lane, and straight from any lane EXCEPT the left-turn lane. Single-lane
+// roads allow everything.
 function laneAllows(v, out) {
     const count = v.lane.segment.lanesByDir[v.lane.dir].length;
+    if (count === 1) return true;
     const mv = movementType(v.lane, out);
-    if (mv === 'straight') return true;
     if (mv === 'left') return v.lane.index === 0;
-    return v.lane.index === count - 1; // right
+    if (mv === 'right') return v.lane.index === count - 1;
+    return v.lane.index !== 0; // straight: not from the left-turn lane
 }
 
 function chooseNextLane(v) {
     const cost = routes.get(v.destSink.id);
-    const laneCount = v.lane.segment.lanesByDir[v.lane.dir].length;
 
     // Route cost ties across a segment's parallel lanes, so pick the exit
     // SEGMENT first (cheapest, lane-discipline-aware)...
@@ -559,11 +558,7 @@ function chooseNextLane(v) {
 
     let chosen = null, bestVal = Infinity;
     for (const [, e] of segs) {
-        const mv = movementType(v.lane, e.lanes[0]);
-        const allowed = mv === 'straight'
-            || (mv === 'left' && v.lane.index === 0)
-            || (mv === 'right' && v.lane.index === laneCount - 1);
-        const val = e.val + Math.random() * 0.5 + (allowed ? 0 : 8); // prefer lane-appropriate
+        const val = e.val + Math.random() * 0.5 + (laneAllows(v, e.lanes[0]) ? 0 : 8); // prefer lane-appropriate
         if (val < bestVal) { bestVal = val; chosen = e; }
     }
 
@@ -577,8 +572,9 @@ function chooseNextLane(v) {
     return pick;
 }
 
-// The lane index the car should be in for its intended route movement:
-// inner for a left, curb for a right, current for straight.
+// The lane the car should be in for its intended route movement: the left
+// (inner) lane for a left turn, the curb lane for straight or right (so the
+// left lane is reserved for left turns).
 function intendedLaneIndex(v) {
     const cost = routes.get(v.destSink.id);
     let best = null, bestVal = Infinity;
@@ -587,10 +583,8 @@ function intendedLaneIndex(v) {
         if (val < bestVal) { bestVal = val; best = out; }
     }
     if (!best) return v.lane.index;
-    const mv = movementType(v.lane, best);
-    if (mv === 'left') return 0;
-    if (mv === 'right') return v.lane.segment.lanesByDir[v.lane.dir].length - 1;
-    return v.lane.index;
+    if (movementType(v.lane, best) === 'left') return 0;
+    return v.lane.segment.lanesByDir[v.lane.dir].length - 1; // straight or right → curb lane
 }
 
 // Move to the adjacent same-direction lane (one step toward newIndex) if the
