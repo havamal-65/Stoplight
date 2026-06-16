@@ -795,11 +795,24 @@ export function updateVehicles(delta) {
             if (tn.t >= 1) { v.turning = false; placeOnLane(v, tn.nextLane, tn.entry); v.turn = null; }
         } else if (v.lane) {
             const stopAt = v.lane.length - setback; // box-edge stop line
-            // Get into the correct turn lane as soon as we're on the segment
-            // (just clear of the box) — not only in the last stretch.
-            if (v.lateral === 0 && distToStop > 10) {
+            // Get into the correct turn lane as soon as we're on the segment,
+            // but finish well before the line so we never turn mid-glide.
+            if (v.lateral === 0 && distToStop > 16) {
                 const want = intendedLaneIndex(v);
                 if (want !== v.lane.index) changeLaneToward(v, want);
+            }
+            // If we'd reach the line still mid lane-change, settle into the lane
+            // first (ease the lateral offset) instead of turning from off-centre,
+            // which would swing the car into the neighbouring lane.
+            if (v.laneDist + step >= stopAt && Math.abs(v.lateral) > 0.3) {
+                v.laneDist = stopAt;
+                v.lateral -= Math.sign(v.lateral) * Math.min(Math.abs(v.lateral), 0.25);
+                const p = lanePointAt(v.lane, stopAt);
+                const nx = -Math.cos(p.heading), nz = Math.sin(p.heading);
+                v.position.set(p.x + nx * v.lateral, 0, p.z + nz * v.lateral);
+                v.rotationY = p.heading;
+                v.speed = Math.min(v.speed, 0.04);
+                continue;
             }
             if (v.laneDist + step >= stopAt) {
                 const node = v.lane.toNode;
