@@ -400,10 +400,15 @@ function landingClear(lane, self) {
     for (let cx = minCX; cx <= maxCX; cx++) for (let cz = minCZ; cz <= maxCZ; cz++) {
         const cell = grid.get((cx + 512) * 1024 + (cz + 512)); if (!cell) continue;
         for (const o of cell) {
-            if (o === self || !o.stopped) continue;
+            if (o === self) continue;
             const dx = o.position.x - p.x, dz = o.position.z - p.z;
             const along = fx * dx + fz * dz, latd = Math.abs(-fz * dx + fx * dz);
-            if (latd < lat && along > -2 && along < ahead) return false;
+            if (latd >= lat) continue;
+            // a stopped queue anywhere in the landing zone, OR a slow/stopped car
+            // right in the landing spot (would land on top of it). Fast through-
+            // traffic is fine — it clears before we land, and the step clamp
+            // prevents real penetration next frame.
+            if ((o.stopped && along > -2 && along < ahead) || (o.speed < 0.15 && along > -2 && along < 5)) return false;
         }
     }
     return true;
@@ -537,14 +542,39 @@ function laneAllows(v, out) {
 
 function chooseNextLane(v) {
     const cost = routes.get(v.destSink.id);
-    let best = null, bestVal = Infinity, fallback = null, fbVal = Infinity;
+    const laneCount = v.lane.segment.lanesByDir[v.lane.dir].length;
+
+    // Route cost ties across a segment's parallel lanes, so pick the exit
+    // SEGMENT first (cheapest, lane-discipline-aware)...
+    const segs = new Map(); // segment -> { val, lanes: [] }
     for (const out of v.lane.next) {
-        const val = routeCostOf(v, out, cost) + Math.random() * 0.5;
-        if (!Number.isFinite(val)) continue;
-        if (val < fbVal) { fbVal = val; fallback = out; }
-        if (laneAllows(v, out) && val < bestVal) { bestVal = val; best = out; }
+        const base = routeCostOf(v, out, cost);
+        if (!Number.isFinite(base)) continue;
+        let e = segs.get(out.segment);
+        if (!e) { e = { val: base, lanes: [] }; segs.set(out.segment, e); }
+        e.val = Math.min(e.val, base);
+        e.lanes.push(out);
     }
-    return best || fallback || v.lane.next[0] || null;
+    if (segs.size === 0) return v.lane.next[0] || null;
+
+    let chosen = null, bestVal = Infinity;
+    for (const [, e] of segs) {
+        const mv = movementType(v.lane, e.lanes[0]);
+        const allowed = mv === 'straight'
+            || (mv === 'left' && v.lane.index === 0)
+            || (mv === 'right' && v.lane.index === laneCount - 1);
+        const val = e.val + Math.random() * 0.5 + (allowed ? 0 : 8); // prefer lane-appropriate
+        if (val < bestVal) { bestVal = val; chosen = e; }
+    }
+
+    // ...then land in the corresponding lane: straight keeps the same lane
+    // number; a left goes to the inner lane, a right to the curb lane.
+    const mv = movementType(v.lane, chosen.lanes[0]);
+    const exitCount = chosen.lanes.length;
+    const target = mv === 'left' ? 0 : mv === 'right' ? exitCount - 1 : Math.min(v.lane.index, exitCount - 1);
+    let pick = chosen.lanes[0], pd = Infinity;
+    for (const o of chosen.lanes) { const d = Math.abs(o.index - target); if (d < pd) { pd = d; pick = o; } }
+    return pick;
 }
 
 // The lane index the car should be in for its intended route movement:
