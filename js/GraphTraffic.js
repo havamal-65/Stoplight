@@ -690,43 +690,72 @@ function needStopAtLine(v, distToEnd, desperate) {
     return false;
 }
 
-// Is this turn a left turn? (entry tangent vs exit heading bends left)
-function turnIsLeft(turn) {
-    const ehx = turn.ctrl.x - turn.p0.x, ehz = turn.ctrl.z - turn.p0.z;
-    const entry = Math.atan2(ehx, ehz);
-    let d = turn.exitHeading - entry;
-    while (d > Math.PI) d -= 2 * Math.PI;
-    while (d < -Math.PI) d += 2 * Math.PI;
-    return d > 0.5;
+// Point on a turn's quadratic bezier at parameter t
+function turnPointAt(turn, t) {
+    const mt = 1 - t;
+    return {
+        x: mt * mt * turn.p0.x + 2 * mt * t * turn.ctrl.x + t * t * turn.p1.x,
+        z: mt * mt * turn.p0.z + 2 * mt * t * turn.ctrl.z + t * t * turn.p1.z
+    };
 }
 
-// A left-turner yields to oncoming traffic crossing its path. The conflict is
-// with oncoming through/right movers (they have right of way) — whether they're
-// still approaching OR already in the box mid-cross. Opposing LEFT turners pass
-// each other (left-to-left), so we don't yield to them EXCEPT to break a
-// simultaneous-entry collision, where the lower-priority (higher spawnIndex)
-// left waits. Through/right vs opposing-left is read from the lane (left lane =
-// left-turn-only) or, for cars already turning, from their arc.
-function leftTurnYield(v, node) {
-    const fx = Math.sin(v.rotationY), fz = Math.cos(v.rotationY);
-    const clearTime = (node.radius * 2 + 6) / Math.max(v.lane.speedLimit, 0.05) + 12;
-    const scan = node.radius + 45;
-    const minCX = Math.floor((node.pos.x - scan) / CELL_SIZE), maxCX = Math.floor((node.pos.x + scan) / CELL_SIZE);
-    const minCZ = Math.floor((node.pos.z - scan) / CELL_SIZE), maxCZ = Math.floor((node.pos.z + scan) / CELL_SIZE);
+// Distance to a car's standardized "turn-in point" (the box-edge stop line
+// where it enters the junction). A car already in the box returns -1 (it has
+// committed → top priority). Smaller distance = closer to entering = higher
+// priority. Priority is therefore LOCAL (who's nearest the turn-in goes first),
+// so it can't cascade the way a global ordering does.
+function turnInDist(v) {
+    if (v.turning) return -1;
+    if (!v.lane) return 1e9;
+    return Math.max(0, (v.lane.length - stopSetback(v.lane)) - v.laneDist);
+}
+
+// Squared distance from point (sx,sz) to the forward ray of a car: origin
+// (ox,oz), unit direction (dx,dz), clamped to length L. Used to test whether a
+// car's trajectory through the box crosses our planned arc — works even when the
+// other car is still sitting at its line (speed 0), because it follows the
+// HEADING, not where the car has physically moved yet.
+function pointRayDist2(sx, sz, ox, oz, dx, dz, L) {
+    let t = (sx - ox) * dx + (sz - oz) * dz;
+    if (t < 0) t = 0; else if (t > L) t = L;
+    const ex = sx - (ox + dx * t), ez = sz - (oz + dz * t);
+    return ex * ex + ez * ez;
+}
+
+// Driver's vision cone: before entering, look along the path we PLAN to take
+// through the junction and yield to any higher-priority car whose own
+// trajectory crosses that path. Priority is LOCAL — distance to the turn-in
+// point (cars already in the box rank highest), ties broken by id — so among a
+// set of conflicting cars exactly one (the closest) proceeds and the rest hold
+// at their lines. Because we gate ENTRY only (never brake mid-box), a stricter
+// test here removes turn-vs-turn collisions without causing box-blocking.
+function coneBlocked(v, turn, node) {
+    const fx = v.dirX, fz = v.dirZ;
+    const myPri = turnInDist(v);
+    const pts = [turnPointAt(turn, 0.15), turnPointAt(turn, 0.35), turnPointAt(turn, 0.55),
+        turnPointAt(turn, 0.75), turnPointAt(turn, 0.95)];
+    const W2 = 12;                       // path-conflict half-width^2 (~3.5 units)
+    const L = node.radius * 2 + 6;       // how far a car's trajectory reaches into the box
+    const near2 = (node.radius + 14) * (node.radius + 14); // o must be engaged with THIS junction
+    const range = node.radius + 14;
+    const minCX = Math.floor((node.pos.x - range) / CELL_SIZE), maxCX = Math.floor((node.pos.x + range) / CELL_SIZE);
+    const minCZ = Math.floor((node.pos.z - range) / CELL_SIZE), maxCZ = Math.floor((node.pos.z + range) / CELL_SIZE);
     for (let cx = minCX; cx <= maxCX; cx++) for (let cz = minCZ; cz <= maxCZ; cz++) {
         const cell = grid.get((cx + 512) * 1024 + (cz + 512)); if (!cell) continue;
         for (const o of cell) {
-            if (o === v || o.waitingToEnter || o.speed < 0.05) continue;
-            if (fx * o.dirX + fz * o.dirZ > -0.4) continue; // must be oncoming (heading ~opposite)
-            const dx = o.position.x - node.pos.x, dz = o.position.z - node.pos.z;
-            const dist = Math.hypot(dx, dz);
-            const inBox = dist < node.radius + 3;
-            const approaching = (o.dirX * (-dx) + o.dirZ * (-dz) > 0) && (dist / o.speed < clearTime);
-            if (!inBox && !approaching) continue;
-            const oIsLeft = o.turning ? (o.turn && turnIsLeft(o.turn))
-                : (o.lane.segment.lanesByDir[o.lane.dir].length > 1 && o.lane.index === 0);
-            if (!oIsLeft) return true;                       // through/right has right of way
-            if (o.spawnIndex < v.spawnIndex) return true;    // opposing left: lower priority yields
+            if (o === v || o.waitingToEnter) continue;
+            // Only cars at this junction's lines or inside its box can conflict
+            const ddx = o.position.x - node.pos.x, ddz = o.position.z - node.pos.z;
+            if (ddx * ddx + ddz * ddz > near2) continue;
+            // Same-direction (parallel/following) traffic never crosses us
+            if (fx * o.dirX + fz * o.dirZ > 0.6) continue;
+            const op = turnInDist(o);
+            const higher = op < myPri - 0.5 || (Math.abs(op - myPri) <= 0.5 && o.spawnIndex < v.spawnIndex);
+            if (!higher) continue;
+            // Does o's forward trajectory cross our planned arc?
+            for (const s of pts) {
+                if (pointRayDist2(s.x, s.z, o.position.x, o.position.z, o.dirX, o.dirZ, L) < W2) return true;
+            }
         }
     }
     return false;
@@ -836,9 +865,12 @@ export function updateVehicles(delta) {
                 const sig = laneSignalState(v.lane);
                 const turn = computeTurn(v, next);
                 let blocked = (sig === 'red' || sig === 'yellow') || !landingClear(next, v);
-                // Unprotected left turns yield to oncoming through/right (and to
-                // higher-priority opposing lefts) crossing the box
-                if (!blocked && movementType(v.lane, next) === 'left' && leftTurnYield(v, node)) blocked = true;
+                // Vision-cone deconfliction: look along the planned turn arc and
+                // yield to higher-priority cars (closer to their turn-in point, or
+                // already in the box) on a crossing path. Standardised turn-in
+                // priority resolves opposing lefts and left-vs-through without
+                // wedging the box.
+                if (!blocked && coneBlocked(v, turn, node)) blocked = true;
                 if (!desperate && blocked) {
                     v.laneDist = stopAt; // hold at the box edge, not the centre
                     const p = lanePointAt(v.lane, v.laneDist);
