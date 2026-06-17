@@ -626,7 +626,7 @@ function tryEnterMap(v) {
     return false;
 }
 
-function startTurn(v, nextLane) {
+function computeTurn(v, nextLane) {
     const p0 = v.position.clone(); p0.y = 0;
     // Cross the whole intersection: land on the far box edge of the next lane
     const entry = entryDist(nextLane);
@@ -650,9 +650,10 @@ function startTurn(v, nextLane) {
     }
     if (!ctrl) ctrl = new THREE.Vector3((p0.x + p1.x) / 2, 0, (p0.z + p1.z) / 2);
 
-    v.turning = true;
-    v.turn = { p0, p1, ctrl, exitHeading: h1, nextLane, entry, length: p0.distanceTo(ctrl) + ctrl.distanceTo(p1), t: 0 };
+    return { p0, p1, ctrl, exitHeading: h1, nextLane, entry, length: p0.distanceTo(ctrl) + ctrl.distanceTo(p1), t: 0 };
 }
+
+function startTurn(v, nextLane) { v.turn = computeTurn(v, nextLane); v.turning = true; }
 
 // Intelligent Driver Model acceleration toward free speed v0, made more
 // restrictive by each obstacle in `leaders` ({ gap, speed }). Returns accel
@@ -689,12 +690,23 @@ function needStopAtLine(v, distToEnd, desperate) {
     return false;
 }
 
-// Unprotected left turn: yield to oncoming MOVING through-traffic. Uses a
-// time-to-arrival gap — yield if any oncoming car (opposite heading, moving,
-// and approaching the node) would reach the box before we can clear it
-// (~2 radii at cruise + buffer). Other turners are excluded (opposing lefts
-// pass without crossing, and excluding them avoids deadlock); stopped cars are
-// excluded so a long-stuck turner still gets out via the desperate override.
+// Is this turn a left turn? (entry tangent vs exit heading bends left)
+function turnIsLeft(turn) {
+    const ehx = turn.ctrl.x - turn.p0.x, ehz = turn.ctrl.z - turn.p0.z;
+    const entry = Math.atan2(ehx, ehz);
+    let d = turn.exitHeading - entry;
+    while (d > Math.PI) d -= 2 * Math.PI;
+    while (d < -Math.PI) d += 2 * Math.PI;
+    return d > 0.5;
+}
+
+// A left-turner yields to oncoming traffic crossing its path. The conflict is
+// with oncoming through/right movers (they have right of way) — whether they're
+// still approaching OR already in the box mid-cross. Opposing LEFT turners pass
+// each other (left-to-left), so we don't yield to them EXCEPT to break a
+// simultaneous-entry collision, where the lower-priority (higher spawnIndex)
+// left waits. Through/right vs opposing-left is read from the lane (left lane =
+// left-turn-only) or, for cars already turning, from their arc.
 function leftTurnYield(v, node) {
     const fx = Math.sin(v.rotationY), fz = Math.cos(v.rotationY);
     const clearTime = (node.radius * 2 + 6) / Math.max(v.lane.speedLimit, 0.05) + 12;
@@ -704,11 +716,17 @@ function leftTurnYield(v, node) {
     for (let cx = minCX; cx <= maxCX; cx++) for (let cz = minCZ; cz <= maxCZ; cz++) {
         const cell = grid.get((cx + 512) * 1024 + (cz + 512)); if (!cell) continue;
         for (const o of cell) {
-            if (o === v || o.waitingToEnter || o.turning || o.speed < 0.05) continue;
-            if (fx * o.dirX + fz * o.dirZ > -0.5) continue; // must be oncoming (opposite)
+            if (o === v || o.waitingToEnter || o.speed < 0.05) continue;
+            if (fx * o.dirX + fz * o.dirZ > -0.4) continue; // must be oncoming (heading ~opposite)
             const dx = o.position.x - node.pos.x, dz = o.position.z - node.pos.z;
-            if (o.dirX * (-dx) + o.dirZ * (-dz) <= 0) continue; // must be approaching the node
-            if (Math.hypot(dx, dz) / o.speed < clearTime) return true; // arrives before we clear
+            const dist = Math.hypot(dx, dz);
+            const inBox = dist < node.radius + 3;
+            const approaching = (o.dirX * (-dx) + o.dirZ * (-dz) > 0) && (dist / o.speed < clearTime);
+            if (!inBox && !approaching) continue;
+            const oIsLeft = o.turning ? (o.turn && turnIsLeft(o.turn))
+                : (o.lane.segment.lanesByDir[o.lane.dir].length > 1 && o.lane.index === 0);
+            if (!oIsLeft) return true;                       // through/right has right of way
+            if (o.spawnIndex < v.spawnIndex) return true;    // opposing left: lower priority yields
         }
     }
     return false;
@@ -816,8 +834,10 @@ export function updateVehicles(delta) {
                 // Don't enter on red, and not unless there's room to land (so we
                 // never wedge mid-turn). Desperate cars push on to break knots.
                 const sig = laneSignalState(v.lane);
+                const turn = computeTurn(v, next);
                 let blocked = (sig === 'red' || sig === 'yellow') || !landingClear(next, v);
-                // Unprotected left turns yield to oncoming through-traffic
+                // Unprotected left turns yield to oncoming through/right (and to
+                // higher-priority opposing lefts) crossing the box
                 if (!blocked && movementType(v.lane, next) === 'left' && leftTurnYield(v, node)) blocked = true;
                 if (!desperate && blocked) {
                     v.laneDist = stopAt; // hold at the box edge, not the centre
@@ -825,7 +845,7 @@ export function updateVehicles(delta) {
                     v.position.set(p.x, 0, p.z); v.rotationY = p.heading;
                     v.speed = 0; v.stopped = true;
                 } else {
-                    startTurn(v, next);
+                    v.turn = turn; v.turning = true; // commit the turn we planned
                 }
             } else {
                 v.laneDist += step;
