@@ -712,9 +712,9 @@ function turnInDist(v) {
 
 // Squared distance from point (sx,sz) to the forward ray of a car: origin
 // (ox,oz), unit direction (dx,dz), clamped to length L. Used to test whether a
-// car's trajectory through the box crosses our planned arc — works even when the
-// other car is still sitting at its line (speed 0), because it follows the
-// HEADING, not where the car has physically moved yet.
+// car still at its line (not yet turning) will cross our planned arc — it
+// follows the HEADING, not where the car has physically moved yet, so it catches
+// two opposing cars that commit on the same frame at speed 0.
 function pointRayDist2(sx, sz, ox, oz, dx, dz, L) {
     let t = (sx - ox) * dx + (sz - oz) * dz;
     if (t < 0) t = 0; else if (t > L) t = L;
@@ -722,24 +722,47 @@ function pointRayDist2(sx, sz, ox, oz, dx, dz, L) {
     return ex * ex + ez * ez;
 }
 
+// Does our planned arc (sampled into pts) cross a turning car's REMAINING arc?
+// We sample the other car's bezier from its current progress to the exit, so the
+// crossing point drops out of the test the moment that car drives past it — that
+// temporal gate is what lets us wait only as long as it's actually in our way.
+function arcCrossesPlan(pts, oTurn, W2) {
+    const t0 = Math.max(0, Math.min(1, oTurn.t || 0));
+    for (let k = 0; k <= 6; k++) {
+        const q = turnPointAt(oTurn, t0 + (1 - t0) * (k / 6));
+        for (const s of pts) {
+            const dx = s.x - q.x, dz = s.z - q.z;
+            if (dx * dx + dz * dz < W2) return true;
+        }
+    }
+    return false;
+}
+
 // Driver's vision cone: before entering, look along the path we PLAN to take
-// through the junction and yield to any higher-priority car whose own
-// trajectory crosses that path. Priority is LOCAL — distance to the turn-in
-// point (cars already in the box rank highest), ties broken by id — so among a
-// set of conflicting cars exactly one (the closest) proceeds and the rest hold
-// at their lines. Because we gate ENTRY only (never brake mid-box), a stricter
-// test here removes turn-vs-turn collisions without causing box-blocking.
+// through the junction and yield to any higher-priority car whose own path
+// crosses ours. Priority is LOCAL — distance to the turn-in point (cars already
+// in the box rank highest), ties broken by id — so among a set of conflicting
+// cars exactly one (the closest) proceeds and the rest hold at their lines.
+// A car already turning is tested against its real remaining arc (a path
+// reservation that catches mid-box crossings); a car still at its line is
+// tested against its heading ray (catches same-frame opposing commits).
+// Returns 2 = HARD block (a car is physically crossing the box on our path —
+// never barge into it, even when desperate), 1 = SOFT block (we'd be yielding
+// turn order to a waiting car — a desperate, long-stuck car may override this to
+// break gridlock), 0 = clear. Because we gate ENTRY only and never brake
+// mid-box, this removes turn-vs-turn collisions without causing box-blocking.
 function coneBlocked(v, turn, node) {
     const fx = v.dirX, fz = v.dirZ;
     const myPri = turnInDist(v);
     const pts = [turnPointAt(turn, 0.15), turnPointAt(turn, 0.35), turnPointAt(turn, 0.55),
         turnPointAt(turn, 0.75), turnPointAt(turn, 0.95)];
-    const W2 = 12;                       // path-conflict half-width^2 (~3.5 units)
-    const L = node.radius * 2 + 6;       // how far a car's trajectory reaches into the box
+    const W2 = 14;                       // path-conflict half-width^2 (~3.7 units)
+    const L = node.radius * 2 + 6;       // how far a line-waiting car's heading reaches into the box
     const near2 = (node.radius + 14) * (node.radius + 14); // o must be engaged with THIS junction
     const range = node.radius + 14;
     const minCX = Math.floor((node.pos.x - range) / CELL_SIZE), maxCX = Math.floor((node.pos.x + range) / CELL_SIZE);
     const minCZ = Math.floor((node.pos.z - range) / CELL_SIZE), maxCZ = Math.floor((node.pos.z + range) / CELL_SIZE);
+    let soft = 0;
     for (let cx = minCX; cx <= maxCX; cx++) for (let cz = minCZ; cz <= maxCZ; cz++) {
         const cell = grid.get((cx + 512) * 1024 + (cz + 512)); if (!cell) continue;
         for (const o of cell) {
@@ -747,18 +770,24 @@ function coneBlocked(v, turn, node) {
             // Only cars at this junction's lines or inside its box can conflict
             const ddx = o.position.x - node.pos.x, ddz = o.position.z - node.pos.z;
             if (ddx * ddx + ddz * ddz > near2) continue;
-            // Same-direction (parallel/following) traffic never crosses us
-            if (fx * o.dirX + fz * o.dirZ > 0.6) continue;
-            const op = turnInDist(o);
-            const higher = op < myPri - 0.5 || (Math.abs(op - myPri) <= 0.5 && o.spawnIndex < v.spawnIndex);
-            if (!higher) continue;
-            // Does o's forward trajectory cross our planned arc?
-            for (const s of pts) {
-                if (pointRayDist2(s.x, s.z, o.position.x, o.position.z, o.dirX, o.dirZ, L) < W2) return true;
+            if (o.turning && o.turn) {
+                // A car physically crossing the box on our path is a HARD block
+                // regardless of turn-in priority — you never drive into it.
+                if (arcCrossesPlan(pts, o.turn, W2)) return 2;
+            } else {
+                // Still at its line: yield turn order only to higher-priority
+                // (closer to turn-in) crossing traffic — a SOFT block.
+                const op = turnInDist(o);
+                const higher = op < myPri - 0.5 || (Math.abs(op - myPri) <= 0.5 && o.spawnIndex < v.spawnIndex);
+                if (!higher) continue;
+                if (fx * o.dirX + fz * o.dirZ > 0.6) continue; // same-direction never crosses us
+                for (const s of pts) {
+                    if (pointRayDist2(s.x, s.z, o.position.x, o.position.z, o.dirX, o.dirZ, L) < W2) { soft = 1; break; }
+                }
             }
         }
     }
-    return false;
+    return soft;
 }
 
 // Stop-line setback from the node centre (so cars wait at the box edge), and
@@ -869,9 +898,13 @@ export function updateVehicles(delta) {
                 // yield to higher-priority cars (closer to their turn-in point, or
                 // already in the box) on a crossing path. Standardised turn-in
                 // priority resolves opposing lefts and left-vs-through without
-                // wedging the box.
-                if (!blocked && coneBlocked(v, turn, node)) blocked = true;
-                if (!desperate && blocked) {
+                // wedging the box. A HARD block (cone === 2: a car physically
+                // crossing the box ahead) holds even a desperate car so it can't
+                // T-bone; a SOFT block (turn-order yield) gives way to desperation.
+                const cone = coneBlocked(v, turn, node);
+                if (cone) blocked = true;
+                const hardHold = cone === 2;
+                if ((!desperate || hardHold) && blocked) {
                     v.laneDist = stopAt; // hold at the box edge, not the centre
                     const p = lanePointAt(v.lane, v.laneDist);
                     v.position.set(p.x, 0, p.z); v.rotationY = p.heading;
